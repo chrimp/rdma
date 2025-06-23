@@ -1,7 +1,16 @@
 ﻿# CMakeList.txt : CMake project for rdma, include source and define
 # project specific logic here.
 #
-cmake_minimum_required (VERSION 3.8)
+cmake_minimum_required (VERSION 3.12)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Add source to this project's executable.
+project (rdma CXX)
+add_executable (rdma "rdma.cpp")
 
 # Enable Hot Reload for MSVC compilers if supported.
 if (POLICY CMP0141)
@@ -9,13 +18,11 @@ if (POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
-project ("rdma")
+if (WIN32)
+    add_subdirectory("include/Win/NetworkDirect")
+    add_subdirectory("include/Win/MyND2Class")
 
-# Add source to this project's executable.
-add_executable (rdma "rdma.cpp" "rdma.h")
-
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET rdma PROPERTY CXX_STANDARD 20)
+    target_link_libraries(rdma PRIVATE NetworkDirect MyND2Class)
 endif()
 
 # TODO: Add tests and install targets if needed.
