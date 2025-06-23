@@ -290,6 +290,8 @@ HRESULT NDSessionServerBase::Listen(const char* localAddr) {
         std::cerr << "Failed to start listening: " << std::hex << hr << std::endl;
         return hr;
     }
+
+    return hr;
 }
 
 HRESULT NDSessionServerBase::GetConnectionRequest() {
