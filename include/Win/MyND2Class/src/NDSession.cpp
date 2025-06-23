@@ -112,11 +112,26 @@ HRESULT NDSessionBase::CreateQP(DWORD receiveQueueDepth, DWORD initiatorQueueDep
 }
 
 bool NDSessionBase::Initialize(char* localAddr) {
-    sockaddr_in addr = { 0 };
+    struct sockaddr_in addr = { 0 };
     int len = sizeof(addr);
     WSAStringToAddress(localAddr, AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&addr), &len);
 
     HRESULT hr = NdOpenAdapter(IID_IND2Adapter, reinterpret_cast<const struct sockaddr*>(&addr), sizeof(addr), reinterpret_cast<void**>(&m_pAdapter));
+        if (hr == ND_INVALID_ADDRESS) {
+        std::cerr << "ND_INVALID_ADDRESS: The specified IP does not correspond to an RDMA-capable adapter for NDv2." << std::endl;
+        
+        // --- DIAGNOSTIC: Try opening with NDv1 ---
+        INDAdapter* pV1Adapter = nullptr;
+        HRESULT hrV1 = NdOpenAdapter(IID_INDAdapter, reinterpret_cast<const struct sockaddr*>(&addr), sizeof(addr), reinterpret_cast<void**>(&pV1Adapter));
+        if (SUCCEEDED(hrV1)) {
+            std::cerr << "DIAGNOSTIC SUCCESS: Adapter opened successfully with NetworkDirect v1 (IID_INDAdapter)." << std::endl;
+            std::cerr << "This indicates the NDv2 provider on your system is faulty or misconfigured." << std::endl;
+            pV1Adapter->Release();
+        } else {
+            std::cerr << "DIAGNOSTIC FAILURE: Failed to open adapter with NDv1 as well. Error: " << std::hex << hrV1 << std::endl;
+        }
+        abort();
+    }
     if (FAILED(hr)) {
         std::cerr << "Failed to open adapter: " << std::hex << hr << std::endl;
         return false;
@@ -276,7 +291,7 @@ HRESULT NDSessionServerBase::CreateListener() {
 }
 
 HRESULT NDSessionServerBase::Listen(const char* localAddr) {
-    sockaddr_in addr = { 0 };
+    struct sockaddr_in addr = { 0 };
     int len = sizeof(addr);
     WSAStringToAddress(const_cast<char*>(localAddr), AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&addr), &len);
 
@@ -314,11 +329,13 @@ HRESULT NDSessionServerBase::Accept(DWORD inboundReadLimit, DWORD outboundReadLi
 // MARK: NDSessionClientBase
 
 HRESULT NDSessionClientBase::Connect(const char* localAddr, const char* remoteAddr, DWORD inboundReadLimit, DWORD outboundReadLimit, const void *pPrivateData, DWORD cbPrivateData) {
-    sockaddr_in local = { 0 };
+    struct sockaddr_in local = { 0 };
     int len = sizeof(local);
     WSAStringToAddress(const_cast<char*>(localAddr), AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&local), &len);
+    local.sin_port = htons(54322);
 
-    sockaddr_in remote = { 0 };
+
+    struct sockaddr_in remote = { 0 };
     len = sizeof(remote);
     WSAStringToAddress(const_cast<char*>(remoteAddr), AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&remote), &len);
 
@@ -327,9 +344,21 @@ HRESULT NDSessionClientBase::Connect(const char* localAddr, const char* remoteAd
         hr = m_pConnector->GetOverlappedResult(&m_Ov, true);
     }
 
+    if (FAILED(hr)) {
+        #ifdef _DEBUG
+        abort();
+        #endif
+    }
+
     hr = m_pConnector->Connect(m_pQp, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote), inboundReadLimit, outboundReadLimit, pPrivateData, cbPrivateData, &m_Ov);
     if (hr == ND_PENDING) {
         hr = m_pConnector->GetOverlappedResult(&m_Ov, true);
+    }
+
+    if (FAILED(hr)) {
+        #ifdef _DEBUG
+        abort();
+        #endif
     }
 
     return hr;
