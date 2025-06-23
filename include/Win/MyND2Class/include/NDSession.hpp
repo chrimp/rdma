@@ -2,129 +2,92 @@
 #define NDSESSION_HPP
 #pragma once
 
-#include <functional>
 #include <WinSock2.h>
 #include <WS2tcpip.h>
-#include <vector>
-#include <memory>
-#include <string>
 #include <ndsupport.h>
+#include <variant>
 
-class NDSession {
-    public:
-    using ErrorCallback = std::function<void(HRESULT hr, const char* context)>;
-    using DataCallback = std::function<void(void* buffer, size_t size, void* context)>;
-    using ConnectionCallback = std::function<void(bool connected)>;
+class NDSessionBase {
+    protected:
+    IND2Adapter *m_pAdapter;
+    IND2MemoryRegion *m_pMr;
+    IND2CompletionQueue *m_pCq;
+    IND2QueuePair *m_pQp;
+    IND2Connector *m_pConnector;
+    HANDLE m_hAdapterFile;
+    DWORD m_Buf_Len;
+    void* m_Buf;
+    IND2MemoryWindow *m_pMw;
+    OVERLAPPED m_Ov;
 
-    NDSession();
-    ~NDSession();
+    protected:
+    NDSessionBase();
+    ~NDSessionBase();
 
-    HRESULT Initialize(char* localAddr, ErrorCallback errorCb = nullptr, 
-                       DataCallback dataCb = nullptr, ConnectionCallback connCb = nullptr);
+    // Initialize the adapter with the given ipv4 addr
+    bool Initialize(char* localAddr);
 
-    HRESULT StartServer(USHORT port = 0);
-    HRESULT ConnectToServer(const char* serverAddr, USHORT port);
+    HRESULT CreateMW();
+    HRESULT InvalidateMW();
+    
+    ND2_ADAPTER_INFO GetAdapterInfo();
 
-    HRESULT Send(const void* data, size_t size, void* context = nullptr);
-    HRESULT Receive(size_t expectedSize, void* context = nullptr);
-    HRESULT Read(UINT64 remoteAddr, UINT32 remoteKey, size_t size, void* context = nullptr);
-    HRESULT Write(const void* data, size_t size, UINT64 remoteAddr, UINT32 remoteKey, void* context = nullptr);
+    HRESULT CreateMR();
+    HRESULT RegisterDataBuffer(DWORD bufferLength, ULONG type);
+    HRESULT RegisterDataBuffer(void *pBuffer, DWORD bufferLength, ULONG type);
+    HRESULT CreateCQ(DWORD depth);
+    HRESULT CreateCQ(IND2CompletionQueue **pCq, DWORD depth);
+    HRESULT CreateConnector();
+    HRESULT CreateQP(DWORD queueDepth, DWORD nSge, DWORD inlineDataSize = 0);
+    HRESULT CreateQP(DWORD receiveQueueDepth, DWORD initiatorQueueDepth, DWORD maxReceiveRequestSge, DWORD maxInitiatorRequestSge);
+    
+    void DisconnectConnector();
+    void DeregisterMemory();
 
-    HRESULT GetMemoryInfo(void* buffer, UINT64* remoteAddr, UINT32* remoteKey);
+    HRESULT GetResult();
 
-    HRESULT ProcessEvents(DWORD timeoutms = 0);
+    DWORD PrepareSge(ND2_SGE *pSge, const DWORD nSge, char* pBuf, ULONG buffSize, ULONG headerSize, UINT32 memoryToken);
 
-    USHORT GetListenPort() const { return m_assignedPort; }
+    HRESULT PostReceive(const ND2_SGE* Sge, const DWORD nSge, void *requestContext = nullptr);
+
+    HRESULT Send(const ND2_SGE* Sge, const ULONG nSge, ULONG flags, void* requestContext = nullptr);
+    HRESULT Write(const ND2_SGE* Sge, const ULONG nSge, UINT64 remoteAddr, UINT32 remoteToken, DWORD flags, void *requestContext = nullptr);
+    HRESULT Read(const ND2_SGE* Sge, const ULONG nSge, UINT64 remoteAddr, UINT32 remoteToken, DWORD flags, void *requestContext = nullptr);
+
+    void WaitForEventNotification();
+    
+    ND2_RESULT WaitForCompletion(bool bBlocking = true);
+    HRESULT WaitForCompletion();
+
+    bool WaitForCompletionAndCheckContext(void *expectedContext);
+
+    std::variant<HRESULT, ND2_RESULT> Bind(DWORD bufferLength, ULONG type, void *context = nullptr);
+    std::variant<HRESULT, ND2_RESULT> Bind(const void *pBuf, DWORD BufferLength, ULONG type, void *context = nullptr);
 
     void Shutdown();
 
-    private:
-    HRESULT InitializeFramework();
-    HRESULT SelectAndOpenAdapter(char* localAddr);
-    HRESULT QueryAdapter();
-    HRESULT CreateAllResources();
+    HRESULT FlushQP();
+    HRESULT Reject(const VOID *pPrivateData, DWORD cbPrivateData);
+};
 
-    HRESULT CreateCompletionQueue();
-    HRESULT CreateQueuePair();
-    HRESULT CreateConnector();
-    HRESULT CreateMemoryRegion();
-    HRESULT CreateMemoryWindow();
+class NDSessionServerBase : public NDSessionBase {
+    protected:
+    IND2Listener *m_pListen;
 
-    HRESULT SetupServerListener(USHORT port);
-    HRESULT EstablishClientConnection(const char* serverAddr, USHORT port);
-    HRESULT HandleConnectionEvents();
+    public:
+    NDSessionServerBase();
+    ~NDSessionServerBase();
 
-    HRESULT AllocateAndReigsterBuffer(size_t size, ULONG flags, void** buffer, UINT32* token);
-    HRESULT FindMemoryRegistration(void* buffer, UINT32* localToken, UINT32* remoteToken, UINT64* remoteAddr);
-    void CleanupAllMemory();
+    HRESULT CreateListener();
+    HRESULT Listen(const char *localAddr);
+    HRESULT GetConnectionRequest();
+    HRESULT Accept(DWORD inboundReadLimit, DWORD outboundReadLimit, const void *pPrivateData, DWORD cbPrivateData);
+};
 
-    HRESULT ProcessCompletions();
-    HRESULT HandleCompletion(const ND2_RESULT& result);
-
-    bool m_initialized;
-    bool m_isServer;
-    bool m_connected;
-    USHORT m_assignedPort;
-
-    ConnectionCallback m_connectionCallback;
-    ErrorCallback m_errorCallback;
-    DataCallback m_dataCallback;
-
-    WSADATA m_wsaData;
-    sockaddr_in m_localAddr;
-    sockaddr_in m_serverAddr;
-
-    IND2Adapter* m_adapter;
-    ND2_ADAPTER_INFO m_adapterInfo;
-    IND2CompletionQueue* m_completionQueue;
-    IND2QueuePair* m_queuePair;
-    IND2Connector* m_connector;
-    IND2Listener* m_listener;
-
-    IND2MemoryRegion* m_memoryRegion;
-    IND2MemoryWindow* m_pMemoryWindow;
-    void* m_pBuf;
-
-    OVERLAPPED m_ov;
-    
-    struct ManagedBuffer {
-        void* buffer;
-        size_t size;
-        IND2MemoryRegion* memoryRegion;
-        UINT32 localToken;
-        UINT32 remoteToken;
-        bool inUse;
-    };
-
-    NDSession::ManagedBuffer* GetAvailableBuffer(size_t size);
-
-    std::vector<ManagedBuffer> m_memoryPool;
-    size_t m_defaultBufferSize;
-    size_t m_poolSize;
-
-    struct InternalConfig {
-        ULONG queueDepth;
-        ULONG maxSge;
-        ULONG inlineThreshold;
-        ULONG maxTransferSize;
-        ULONG maxReads;
-    } m_config;
-
-    struct PendingOp {
-        OVERLAPPED overlapped;
-        enum Type { CONNECT, ACCEPT, SEND, RECV, READ, WRITE } type;
-        void* userContext;
-        ManagedBuffer* buffer;
-    };
-
-    std::vector<std::unique_ptr<PendingOp>> m_pendingOps;
-
-    HANDLE m_iocp;
-
-    HANDLE m_overlappedFile;
-
-    CRITICAL_SECTION m_lock;
-    
+class NDSessionClientBase : public NDSessionBase {
+    public:
+    HRESULT Connect(const char *localAddr, const char *remoteAddr, DWORD inboundReadLimit, DWORD outboundReadLimit, const void *pPrivateData = nullptr, DWORD cbPrivateData = 0);
+    HRESULT CompleteConnect();
 };
 
 #endif // NDSESSION_HPP

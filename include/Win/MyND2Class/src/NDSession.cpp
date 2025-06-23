@@ -1,403 +1,342 @@
 #include "NDSession.hpp"
 #include <cassert>
 #include <iostream>
-#include <algorithm>
 
-NDSession::NDSession() :
-    m_initialized(false),
-    m_isServer(false),
-    m_connected(false),
-    m_assignedPort(0),
-    m_adapter(nullptr),
-    m_completionQueue(nullptr),
-    m_queuePair(nullptr),
-    m_connector(nullptr),
-    m_listener(nullptr),
-    m_defaultBufferSize(64 * 1024),
-    m_poolSize(32),
-    m_iocp(nullptr)
+template<typename T>
+void SafeRelease(T*& p) {
+    if (p != nullptr) {
+        p->Release();
+        p = nullptr;
+    }
+}
+
+// MARK: NDSessionBase
+NDSessionBase::NDSessionBase() :
+    m_pAdapter(nullptr), m_pMr(nullptr), m_pCq(nullptr), m_pQp(nullptr), m_pConnector(nullptr), m_hAdapterFile(nullptr),
+    m_Buf(nullptr), m_pMw(nullptr)
 {
-    ZeroMemory(&m_wsaData, sizeof(m_wsaData));
-    ZeroMemory(&m_localAddr, sizeof(m_localAddr));
-    ZeroMemory(&m_serverAddr, sizeof(m_serverAddr));
-    ZeroMemory(&m_adapterInfo, sizeof(m_adapterInfo));
-
-    InitializeCriticalSection(&m_lock);
+    RtlZeroMemory(&m_Ov, sizeof(m_Ov));
 }
 
-NDSession::~NDSession() {
-    Shutdown();
-    DeleteCriticalSection(&m_lock);
-}
-
-HRESULT NDSession::Initialize(char* localAddr, ErrorCallback errorCb, DataCallback dataCb, ConnectionCallback connCb) {
-    if (m_initialized) return S_OK;
-
-    m_connectionCallback = connCb;
-    m_errorCallback = errorCb;
-    m_dataCallback = dataCb;
-
-    HRESULT hr;
-
-    hr = InitializeFramework();
-    if (FAILED(hr)) {
-        if (m_errorCallback) m_errorCallback(hr, "Failed to initialize ND framework");
-        return hr;
-    }
-
-    hr = SelectAndOpenAdapter(localAddr);
-    if (FAILED(hr)) {
-        if (m_errorCallback) m_errorCallback(hr, "Failed to open ND adapter");
-        return hr;
-    }
-
-    hr = QueryAdapter();
-    if (FAILED(hr)) {
-        if (m_errorCallback) m_errorCallback(hr, "Failed to query and configure ND adapter");
-        return hr;
-    }
-
-    hr = CreateAllResources();
-    if (FAILED(hr)) {
-        if (m_errorCallback) m_errorCallback(hr, "Failed to create ND resources");
-        return hr;
-    }
-
-    hr = CreateMemoryRegion();
-    if (FAILED(hr)) {
-        if (m_errorCallback) m_errorCallback(hr, "Failed to setup memory pool");
-        return hr;
-    }
-
-    m_initialized = true;
-    return S_OK;
-}
-
-HRESULT NDSession::InitializeFramework() {
-    int ret = WSAStartup(MAKEWORD(2, 2), &m_wsaData);
-    if (ret != 0) {
-        std::cerr << "WSAStartup failed with error: " << ret << std::endl;
-        return HRESULT_FROM_WIN32(ret);
-    }
-
-    HRESULT hr = NdStartup();
-    if (FAILED(hr)) {
-        std::cerr << "NdStartup failed: " << std::hex << hr << std::endl;
-        WSACleanup();
-        return hr;
-    }
-
-    m_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
-    if (!m_iocp) {
-        std::cerr << "CreateIoCompletionPort failed: " << GetLastError() << std::endl;
-        NdCleanup();
-        WSACleanup();
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-
-    return S_OK;
-}
-
-HRESULT NDSession::SelectAndOpenAdapter(char* localAddr) {
-    m_localAddr = { 0 };
-    INT len = sizeof(m_localAddr);
-    WSAStringToAddress(localAddr, AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&m_localAddr), &len);
-
-    HRESULT hr = NdCheckAddress(reinterpret_cast<const struct sockaddr*>(&m_localAddr), sizeof(m_localAddr));
-    if (FAILED(hr)) {
-        std::cerr << "NdCheckAddress failed: " << std::hex << hr << std::endl;
-        return hr;
-    }
-    
-    hr = NdOpenAdapter(IID_IND2Adapter, reinterpret_cast<struct sockaddr*>(&m_localAddr), sizeof(m_localAddr), reinterpret_cast<void**>(&m_adapter));
-    if (FAILED(hr)) {
-        std::cerr << "NdOpenAdapter failed: " << std::hex << hr << std::endl;
-        return hr;
+NDSessionBase::~NDSessionBase() {
+    SafeRelease(m_pMr);
+    SafeRelease(m_pMw);
+    SafeRelease(m_pCq);
+    SafeRelease(m_pQp);
+    SafeRelease(m_pConnector);
+    if (m_hAdapterFile) CloseHandle(m_hAdapterFile);
+    SafeRelease(m_pAdapter);
+    if (m_Buf) {
+        VirtualFree(m_Buf, 0, MEM_RELEASE);
+        m_Buf = nullptr;
     }
 }
 
-HRESULT NDSession::QueryAdapter() {
-    m_adapterInfo.InfoVersion = ND_VERSION_2;
-    ULONG adapterInfoSize = sizeof(m_adapterInfo);
-
-    HRESULT hr = m_adapter->Query(&m_adapterInfo, &adapterInfoSize);
-    if (FAILED(hr)) {
-        std::cerr << "Query adapter info failed: " << std::hex << hr << std::endl;
-        m_adapter->Release();
-        m_adapter = nullptr;
-        return hr;
-    }
+HRESULT NDSessionBase::CreateMR() {
+    HRESULT hr = m_pAdapter->CreateMemoryRegion(IID_IND2MemoryRegion, m_hAdapterFile, reinterpret_cast<void**>(&m_pMr));
+    return hr;
 }
 
-HRESULT NDSession::CreateAllResources() {
-    HRESULT hr = CreateCompletionQueue();
-    if (FAILED(hr)) return hr;
+HRESULT NDSessionBase::RegisterDataBuffer(DWORD bufferLength, ULONG type) {
+    m_Buf_Len = bufferLength;
+    m_Buf = new (std::nothrow) char[m_Buf_Len];
+    if (!m_Buf) {
+        std::cerr << "Failed to allocate memory for buffer." << std::endl;
+        return E_OUTOFMEMORY;
+    }
 
-    hr = CreateQueuePair();
-    if (FAILED(hr)) return hr;
-
-    hr = CreateConnector();
-    if (FAILED(hr)) return hr;
-
-    return S_OK;
+    return RegisterDataBuffer(m_Buf, m_Buf_Len, type);
 }
 
-HRESULT NDSession::CreateCompletionQueue() {
-    HRESULT hr = m_adapter->CreateOverlappedFile(&m_overlappedFile);
-
-    ULONG depth = m_adapterInfo.MaxCompletionQueueDepth;
-    hr = m_adapter->CreateCompletionQueue(IID_IND2CompletionQueue, m_overlappedFile, depth, 0, 0, reinterpret_cast<void**>(&m_completionQueue));
-    if (FAILED(hr)) {
-        std::cerr << "CreateCompletionQueue failed: " << std::hex << hr << std::endl;
-        return hr;
-    }
-    
-    return S_OK;
-}
-
-HRESULT NDSession::CreateQueuePair() {
-    ULONG depth = m_adapterInfo.MaxCompletionQueueDepth;
-    ULONG receiveSge = m_adapterInfo.MaxReceiveSge;
-    ULONG readSge = m_adapterInfo.MaxReadSge;
-    ULONG inlineDataSize = m_adapterInfo.MaxInlineDataSize;
-
-    HRESULT hr = m_adapter->CreateQueuePair(IID_IND2QueuePair, m_completionQueue, m_completionQueue,
-                                            nullptr, depth, depth, receiveSge, readSge, inlineDataSize,
-                                            reinterpret_cast<void**>(&m_queuePair));
-    if (FAILED(hr)) {
-        std::cerr << "CreateQueuePair failed: " << std::hex << hr << std::endl;
-        return hr;
-    }
-}
-
-HRESULT NDSession::CreateConnector() {
-    HRESULT hr = m_adapter->CreateConnector(IID_IND2Connector, m_overlappedFile, reinterpret_cast<void**>(&m_connector));
-    if (FAILED(hr)) {
-        std::cerr << "CreateConnector failed: " << std::hex << hr << std::endl;
-        return hr;
-    }
-    
-    return S_OK;
-}
-
-HRESULT NDSession::CreateMemoryRegion() {
-    const size_t x_MaxXfer = 4 * 1024 * 1024;
-    const size_t x_HdrLen = 40;
-
-    HRESULT hr = m_adapter->CreateMemoryRegion(IID_IND2MemoryRegion, m_overlappedFile, reinterpret_cast<void**>(&m_memoryRegion));
-    if (FAILED(hr)) {
-        std::cerr << "CreateMemoryRegion failed: " << std::hex << hr << std::endl;
-        return hr;
-    }
-
-    m_pBuf = static_cast<char*>(HeapAlloc(GetProcessHeap(), 0, x_MaxXfer + x_HdrLen));
-    if (!m_pBuf) {
-        std::cerr << "HeapAlloc failed: " << GetLastError() << std::endl;
-        m_memoryRegion->Release();
-        m_memoryRegion = nullptr;
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-
-    ULONG flags = ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE;
-    hr = m_memoryRegion->Register(m_pBuf, x_MaxXfer + x_HdrLen, flags, &m_ov);
+HRESULT NDSessionBase::RegisterDataBuffer(void *pBuf, DWORD bufferLength, ULONG type) {
+    HRESULT hr = m_pMr->Register(pBuf, bufferLength, type, &m_Ov);
     if (hr == ND_PENDING) {
-        hr = m_memoryRegion->GetOverlappedResult(&m_ov, TRUE);
-        if (SUCCEEDED(hr)) { hr = S_OK; }
+        hr = m_pMr->GetOverlappedResult(&m_Ov, true);
     }
-
-    if (FAILED(hr)) {
-        std::cerr << "MemoryRegion Register failed: " << std::hex << hr << std::endl;
-        HeapFree(GetProcessHeap(), 0, m_pBuf);
-        m_memoryRegion->Release();
-        m_memoryRegion = nullptr;
-        return hr;
-    }
-}
-
-HRESULT NDSession::CreateMemoryWindow() {
-    HRESULT hr = m_adapter->CreateMemoryWindow(IID_IND2MemoryWindow, reinterpret_cast<void**>(&m_pMemoryWindow));
     return hr;
 }
 
-HRESULT NDSession::StartServer(USHORT port) {
-    HRESULT hr = SetupServerListener(port);
-    if (FAILED(hr)) {
-        if (m_errorCallback) m_errorCallback(hr, "Failed to setup server listener");
-        return hr;
-    }
-
-    m_isServer = true;
-    return S_OK;
-}
-
-HRESULT NDSession::ConnectToServer(const char* serverAddr, USHORT port) {
-    HRESULT hr = EstablishClientConnection(serverAddr, port);
-    if (FAILED(hr)) {
-        if (m_errorCallback) m_errorCallback(hr, "Failed to connect to server");
-        return hr;
-    }
-
-    m_connected = true;
-    return S_OK;
-}
-
-HRESULT NDSession::Send(const void* data, size_t size, void* context) {
-    if (!m_connected) return E_NOT_VALID_STATE;
-
-    ManagedBuffer* buffer = GetAvailableBuffer(size);
-    if (!buffer) return E_OUTOFMEMORY;
-
-    memcpy(buffer->buffer, data, size);
-
-    ND2_SGE sge = {0};
-    sge.Buffer = buffer->buffer;
-    sge.BufferLength = static_cast<ULONG>(size);
-    sge.MemoryRegionToken = buffer->localToken;
-
-    HRESULT hr = m_queuePair->Send(context, &sge, 1, 0);
-    if (SUCCEEDED(hr)) buffer->inUse = true;
-    
+HRESULT NDSessionBase::CreateMW() {
+    HRESULT hr = m_pAdapter->CreateMemoryWindow(IID_IND2MemoryWindow, reinterpret_cast<void**>(&m_pMw));
     return hr;
 }
 
-HRESULT NDSession::Receive(size_t expectedSize, void* context) {
-    if (!m_connected) return E_NOT_VALID_STATE;
-
-    ManagedBuffer* buffer = GetAvailableBuffer(expectedSize);
-    if (!buffer) return E_OUTOFMEMORY;
-
-    ND2_SGE sge = {0};
-    sge.Buffer = buffer->buffer;
-    sge.BufferLength = static_cast<ULONG>(expectedSize);
-    sge.MemoryRegionToken = buffer->localToken;
-
-    HRESULT hr = m_queuePair->Receive(context, &sge, 1);
-    if (SUCCEEDED(hr)) buffer->inUse = true;
+HRESULT NDSessionBase::InvalidateMW() {
+    HRESULT hr = m_pQp->Invalidate(nullptr, m_pMw, 0);
     return hr;
 }
 
-HRESULT NDSession::EstablishClientConnection(const char* serverAddr, USHORT port) {
-    sockaddr_in serverAddress = {0};
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(port);
-    inet_pton(AF_INET, serverAddr, &serverAddress.sin_addr);
+std::variant<HRESULT, ND2_RESULT> NDSessionBase::Bind(DWORD bufferLength, ULONG flags, void *context) {
+    return Bind(m_Buf, bufferLength, flags, context);
+}
 
-    HRESULT hr  = m_connector->Bind(reinterpret_cast<const sockaddr*>(&m_localAddr), sizeof(m_localAddr));
-    if (FAILED(hr)) {
-        std::cerr << "Bind failed: " << std::hex << hr << std::endl;
+std::variant<HRESULT, ND2_RESULT> NDSessionBase::Bind(const void *pBuf, DWORD bufferLength, ULONG flags, void *context) {
+    HRESULT hr = m_pQp->Bind(context, m_pMr, m_pMw, pBuf, bufferLength, flags);
+    if (hr != ND_SUCCESS) {
         return hr;
     }
 
-    OVERLAPPED connectOv = {0};
-    connectOv.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    ND2_RESULT ndRes = WaitForCompletion(true);
+    if (ndRes.Status == ND_SUCCESS && ndRes.RequestContext != context) {
+        return E_INVALIDARG;
+    }
 
-    hr = m_connector->Connect(m_queuePair, reinterpret_cast<const sockaddr*>(&serverAddress), sizeof(serverAddress), 0, 0, nullptr, 0, &connectOv);
+    return ndRes;
+}
 
+HRESULT NDSessionBase::CreateCQ(DWORD depth) {
+    HRESULT hr = m_pAdapter->CreateCompletionQueue(IID_IND2CompletionQueue, m_hAdapterFile, depth, 0, 0, reinterpret_cast<void**>(&m_pCq));
+    return hr;
+}
+
+HRESULT NDSessionBase::CreateCQ(IND2CompletionQueue **pCq, DWORD depth) {
+    HRESULT hr = m_pAdapter->CreateCompletionQueue(IID_IND2CompletionQueue, m_hAdapterFile, depth, 0, 0, reinterpret_cast<void**>(pCq));
+    return hr;
+}
+
+HRESULT NDSessionBase::CreateConnector() {
+    HRESULT hr = m_pAdapter->CreateConnector(IID_IND2Connector, m_hAdapterFile, reinterpret_cast<void**>(&m_pConnector));
+    return hr;
+}
+
+HRESULT NDSessionBase::CreateQP(DWORD queueDepth, DWORD nSge, DWORD inlineDataSize) {
+    HRESULT hr = m_pAdapter->CreateQueuePair(IID_IND2QueuePair, m_pCq, m_pCq, nullptr, queueDepth, queueDepth,
+        nSge, nSge, inlineDataSize, reinterpret_cast<void**>(&m_pQp));
+    return hr;
+}
+
+HRESULT NDSessionBase::CreateQP(DWORD receiveQueueDepth, DWORD initiatorQueueDepth, DWORD maxReceiveRequestSge, DWORD maxInitiatorRequestSge) {
+    HRESULT hr = m_pAdapter->CreateQueuePair(IID_IND2QueuePair, m_pCq, m_pCq, nullptr, maxReceiveRequestSge, initiatorQueueDepth,
+        maxReceiveRequestSge, maxInitiatorRequestSge, 0, reinterpret_cast<void**>(&m_pQp));
+    return hr;
+}
+
+bool NDSessionBase::Initialize(char* localAddr) {
+    sockaddr_in addr = { 0 };
+    int len = sizeof(addr);
+    WSAStringToAddress(localAddr, AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&addr), &len);
+
+    HRESULT hr = NdOpenAdapter(IID_IND2Adapter, reinterpret_cast<const struct sockaddr*>(&addr), sizeof(addr), reinterpret_cast<void**>(&m_pAdapter));
+    if (FAILED(hr)) {
+        std::cerr << "Failed to open adapter: " << std::hex << hr << std::endl;
+        return false;
+    }
+
+    m_Ov.hEvent = CreateEvent(nullptr, false, false, nullptr);
+    if (m_Ov.hEvent == nullptr) {
+        std::cerr << "Failed to create event for overlapped operations." << std::endl;
+        return false;
+    }
+
+    hr = m_pAdapter->CreateOverlappedFile(&m_hAdapterFile);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create overlapped file: " << std::hex << hr << std::endl;
+        CloseHandle(m_Ov.hEvent);
+        return false;
+    }
+
+    return true;
+}
+
+ND2_ADAPTER_INFO NDSessionBase::GetAdapterInfo() {
+    ND2_ADAPTER_INFO info = { 0 };
+    info.InfoVersion = ND_VERSION_2;
+    ULONG adapterInfoSize = sizeof(info);
+    HRESULT hr = m_pAdapter->Query(&info, &adapterInfoSize);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to query adapter info: " << std::hex << hr << std::endl;
+        return {};
+    }
+
+    return info;
+}
+
+DWORD NDSessionBase::PrepareSge(ND2_SGE *pSge, const DWORD nSge, char *buff, ULONG buffSize, ULONG headerSize, UINT32 memoryToken) {
+    DWORD currSge = 0;
+    ULONG buffIdx = 0;
+    ULONG currLen = 0;
+
+    while (buffSize != 0 && currSge < nSge) {
+        pSge[currSge].Buffer = buff + buffIdx;
+        currLen = std::min(buffSize, headerSize);
+        pSge[currSge].BufferLength = currLen;
+        pSge[currSge].MemoryRegionToken = memoryToken;
+        buffSize -= currLen;
+        buffIdx += currLen;
+        currSge++;
+    }
+
+    if (buffSize > 0 && currSge > 0) {
+        pSge[currSge - 1].BufferLength += buffSize;
+    }
+    return currSge;
+}
+
+void NDSessionBase::DisconnectConnector() {
+    if (m_pConnector) {
+        m_pConnector->Disconnect(&m_Ov);
+        SafeRelease(m_pConnector);
+    }
+}
+
+void NDSessionBase::DeregisterMemory() {
+    m_pMr->Deregister(&m_Ov);
+}
+
+HRESULT NDSessionBase::GetResult() {
+    HRESULT hr = m_pCq->GetOverlappedResult(&m_Ov, true);
+    return hr;
+}
+
+void NDSessionBase::Shutdown() {
+    DisconnectConnector();
+    DeregisterMemory();
+}
+
+HRESULT NDSessionBase::PostReceive(const ND2_SGE* Sge, const DWORD nSge, void *requestContext) {
+    HRESULT hr = m_pQp->Receive(requestContext, Sge, nSge);
+    return hr;
+}
+
+HRESULT NDSessionBase::Write(const ND2_SGE* Sge, const ULONG nSge, UINT64 remoteAddr, UINT32 remoteToken, DWORD flags, void *requestContext) {
+    HRESULT hr = m_pQp->Write(requestContext, Sge, nSge, remoteAddr, remoteToken, flags);
+    return hr;
+}
+
+HRESULT NDSessionBase::Read(const ND2_SGE* Sge, const ULONG nSge, UINT64 remoteAddr, UINT32 remoteToken, DWORD flags, void *requestContext) {
+    HRESULT hr = m_pQp->Read(requestContext, Sge, nSge, remoteAddr, remoteToken, flags);
+    return hr;
+}
+
+HRESULT NDSessionBase::Send(const ND2_SGE* Sge, const ULONG nSge, ULONG flags, void* requestContext) {
+    HRESULT hr = m_pQp->Send(requestContext, Sge, nSge, flags);
+    return hr;
+}
+
+void NDSessionBase::WaitForEventNotification() {
+    HRESULT hr = m_pCq->Notify(ND_CQ_NOTIFY_ANY, &m_Ov);
     if (hr == ND_PENDING) {
-        WaitForSingleObject(connectOv.hEvent, INFINITE);
-        hr = m_connector->GetOverlappedResult(&connectOv, TRUE);
+        hr = m_pCq->GetOverlappedResult(&m_Ov, true);
     }
-
-    CloseHandle(connectOv.hEvent);
-    return hr;
 }
 
-HRESULT NDSession::SetupServerListener(USHORT port) {
-    // TODO: Create and setup listener
-    HRESULT hr = m_adapter->CreateListener(IID_IND2Listener, m_overlappedFile,
-                                          reinterpret_cast<void**>(&m_listener));
-    if (FAILED(hr)) return hr;
-    
-    // Bind to local address
-    sockaddr_in bindAddr = m_localAddr;
-    bindAddr.sin_port = htons(port);
-    
-    hr = m_listener->Bind(reinterpret_cast<const sockaddr*>(&bindAddr), sizeof(bindAddr));
-    if (FAILED(hr)) return hr;
-    
-    // Start listening
-    hr = m_listener->Listen(1); // backlog of 1
-    if (FAILED(hr)) return hr;
-    
-    // Get assigned port if port was 0
-    ULONG addrSize = sizeof(bindAddr);
-    hr = m_listener->GetLocalAddress(reinterpret_cast<sockaddr*>(&bindAddr), &addrSize);
-    if (SUCCEEDED(hr)) {
-        m_assignedPort = ntohs(bindAddr.sin_port);
-    }
-    
-    return hr;
-}
+ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
+    ND2_RESULT ndRes;
 
-HRESULT NDSession::ProcessEvents(DWORD timeoutms) {
-    // TODO: Process completion queue events
-    DWORD bytesTransferred;
-    ULONG_PTR completionKey;
-    OVERLAPPED* pOverlapped;
-    
-    BOOL result = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, 
-                                           &completionKey, &pOverlapped, timeoutms);
-    
-    if (result || pOverlapped) {
-        // Handle completion
-        return HandleCompletion(bytesTransferred, completionKey, pOverlapped);
-    }
-    
-    return HRESULT_FROM_WIN32(GetLastError());
-}
-
-HRESULT NDSession::HandleCompletion(const ND2_RESULT& result) {
-    // TODO: Handle different completion types
-    switch (result.RequestType) {
-        case Nd2RequestTypeSend:
-            // Handle send completion
-            if (m_dataCallback) {
-                m_dataCallback(nullptr, result.BytesTransferred, result.RequestContext);
-            }
+    for (;;) {
+        if (m_pCq->GetResults(&ndRes, 1) == 1) {
             break;
-            
-        case Nd2RequestTypeReceive:
-            // Handle receive completion
-            if (m_dataCallback) {
-                // Find buffer from context and call callback
-                m_dataCallback(/* buffer */, result.BytesTransferred, result.RequestContext);
-            }
-            break;
-            
-        // Handle other request types...
-    }
-    
-    return S_OK;
-}
-
-NDSession::ManagedBuffer* NDSession::GetAvailableBuffer(size_t size) {
-    EnterCriticalSection(&m_lock);
-    
-    // Find available buffer of sufficient size
-    for (auto& buffer : m_memoryPool) {
-        if (!buffer.inUse && buffer.size >= size) {
-            buffer.inUse = true;
-            LeaveCriticalSection(&m_lock);
-            return &buffer;
+        }
+        if (bBlocking) {
+            WaitForEventNotification();
         }
     }
-    
-    // Allocate new buffer if none available
-    ManagedBuffer newBuffer = {0};
-    size_t allocSize = std::max(size, m_defaultBufferSize);
-    
-    HRESULT hr = AllocateAndReigsterBuffer(allocSize, 
-                                          ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE,
-                                          &newBuffer.buffer, &newBuffer.localToken);
-    
-    if (SUCCEEDED(hr)) {
-        newBuffer.size = allocSize;
-        newBuffer.inUse = true;
-        m_memoryPool.push_back(newBuffer);
-        LeaveCriticalSection(&m_lock);
-        return &m_memoryPool.back();
+
+    return ndRes;
+}
+
+bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext) {
+    ND2_RESULT ndRes = WaitForCompletion(true);
+    if (ND_SUCCESS != ndRes.Status) {
+        std::cerr << "Operation failed with status: " << std::hex << ndRes.Status << std::endl;
+        return false;
     }
-    
-    LeaveCriticalSection(&m_lock);
-    return nullptr;
+    if (expectedContext != ndRes.RequestContext) {
+        std::cerr << "Unexpected completion" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+HRESULT NDSessionBase::WaitForCompletion() {
+    ND2_RESULT ndRes= WaitForCompletion(true);
+    return ndRes.Status;
+}
+
+HRESULT NDSessionBase::FlushQP() {
+    HRESULT hr = m_pQp->Flush();
+    return hr;
+}
+
+HRESULT NDSessionBase::Reject(const void *pPrivateData, DWORD cbPrivateData) {
+    HRESULT hr = m_pConnector->Reject(pPrivateData, cbPrivateData);
+    return hr;
+}
+
+// MARK: NDSessionServerBase
+NDSessionServerBase::NDSessionServerBase() : m_pListen(nullptr) {}
+NDSessionServerBase::~NDSessionServerBase() {
+    SafeRelease(m_pListen);
+}
+
+HRESULT NDSessionServerBase::CreateListener() {
+    HRESULT hr = m_pAdapter->CreateListener(IID_IND2Listener, m_hAdapterFile, reinterpret_cast<void**>(&m_pListen));
+    return hr;
+}
+
+HRESULT NDSessionServerBase::Listen(const char* localAddr) {
+    sockaddr_in addr = { 0 };
+    int len = sizeof(addr);
+    WSAStringToAddress(const_cast<char*>(localAddr), AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&addr), &len);
+
+    HRESULT hr = m_pListen->Bind(reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+    if (FAILED(hr)) {
+        std::cerr << "Failed to bind listener: " << std::hex << hr << std::endl;
+        return hr;
+    }
+    hr = m_pListen->Listen(1);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to start listening: " << std::hex << hr << std::endl;
+        return hr;
+    }
+}
+
+HRESULT NDSessionServerBase::GetConnectionRequest() {
+    HRESULT hr = m_pListen->GetConnectionRequest(m_pConnector, &m_Ov);
+    if (hr == ND_PENDING) {
+        hr = m_pListen->GetOverlappedResult(&m_Ov, true);
+    }
+    return hr;
+}
+
+HRESULT NDSessionServerBase::Accept(DWORD inboundReadLimit, DWORD outboundReadLimit, const void *pPrivateData, DWORD cbPrivateData) {
+    HRESULT hr = m_pConnector->Accept(m_pQp, inboundReadLimit, outboundReadLimit, pPrivateData, cbPrivateData, &m_Ov);
+    if (hr == ND_PENDING) {
+        hr = m_pConnector->GetOverlappedResult(&m_Ov, true);
+    }
+
+    return hr;
+}
+
+// MARK: NDSessionClientBase
+
+HRESULT NDSessionClientBase::Connect(const char* localAddr, const char* remoteAddr, DWORD inboundReadLimit, DWORD outboundReadLimit, const void *pPrivateData, DWORD cbPrivateData) {
+    sockaddr_in local = { 0 };
+    int len = sizeof(local);
+    WSAStringToAddress(const_cast<char*>(localAddr), AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&local), &len);
+
+    sockaddr_in remote = { 0 };
+    len = sizeof(remote);
+    WSAStringToAddress(const_cast<char*>(remoteAddr), AF_INET, nullptr, reinterpret_cast<struct sockaddr*>(&remote), &len);
+
+    HRESULT hr = m_pConnector->Bind(reinterpret_cast<const sockaddr*>(&local), sizeof(local));
+    if (hr == ND_PENDING) {
+        hr = m_pConnector->GetOverlappedResult(&m_Ov, true);
+    }
+
+    hr = m_pConnector->Connect(m_pQp, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote), inboundReadLimit, outboundReadLimit, pPrivateData, cbPrivateData, &m_Ov);
+    if (hr == ND_PENDING) {
+        hr = m_pConnector->GetOverlappedResult(&m_Ov, true);
+    }
+
+    return hr;
+}
+
+HRESULT NDSessionClientBase::CompleteConnect() {
+    HRESULT hr = m_pConnector->CompleteConnect(&m_Ov);
+    if (hr == ND_PENDING) {
+        hr = m_pConnector->GetOverlappedResult(&m_Ov, true);
+    }
+    return hr;
 }
