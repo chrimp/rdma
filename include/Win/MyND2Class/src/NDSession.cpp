@@ -39,7 +39,7 @@ HRESULT NDSessionBase::CreateMR() {
 
 HRESULT NDSessionBase::RegisterDataBuffer(DWORD bufferLength, ULONG type) {
     m_Buf_Len = bufferLength;
-    m_Buf = new (std::nothrow) char[m_Buf_Len];
+    m_Buf = VirtualAlloc(nullptr, m_Buf_Len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!m_Buf) {
         std::cerr << "Failed to allocate memory for buffer." << std::endl;
         return E_OUTOFMEMORY;
