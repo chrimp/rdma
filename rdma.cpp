@@ -116,14 +116,14 @@ public:
     }
 
     void Run(const char* localAddr, const char* serverAddr) {
-        char localAddrWithPort[INET_ADDRSTRLEN + 6];
-        sprintf_s(localAddrWithPort, "%s:0", localAddr); // Bind to any port on the specific local IP
+        //char localAddrWithPort[INET_ADDRSTRLEN + 6];
+        //sprintf_s(localAddrWithPort, "%s", localAddr); // Bind to any port on the specific local IP
 
         char fullServerAddress[INET_ADDRSTRLEN + 6];
         sprintf_s(fullServerAddress, "%s:%s", serverAddr, TEST_PORT);
 
         std::cout << "Connecting from " << localAddr << " to " << fullServerAddress << "..." << std::endl;
-        if (FAILED(Connect(localAddrWithPort, fullServerAddress, 1, 1, nullptr, 0))) {
+        if (FAILED(Connect(localAddr, fullServerAddress, 1, 1, nullptr, 0))) {
              std::cerr << "Connect failed." << std::endl;
              return;
         }

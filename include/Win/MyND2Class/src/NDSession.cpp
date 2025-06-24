@@ -254,6 +254,9 @@ bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext) {
     ND2_RESULT ndRes = WaitForCompletion(true);
     if (ND_SUCCESS != ndRes.Status) {
         std::cerr << "Operation failed with status: " << std::hex << ndRes.Status << std::endl;
+        #ifdef _DEBUG
+        abort();
+        #endif
         return false;
     }
     if (expectedContext != ndRes.RequestContext) {
