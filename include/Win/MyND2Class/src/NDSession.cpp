@@ -238,6 +238,20 @@ void NDSessionBase::WaitForEventNotification() {
 ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
     ND2_RESULT ndRes;
 
+    if (m_pCq->GetResults(&ndRes, 1) == 1) {
+        return ndRes;
+    }
+
+    if (!bBlocking) {
+        ndRes.Status = ND_PENDING;
+        return ndRes;
+    }
+
+    do {
+        WaitForEventNotification();
+    } while (m_pCq->GetResults(&ndRes, 1) == 0);
+
+    /*
     for (;;) {
         if (m_pCq->GetResults(&ndRes, 1) == 1) {
             break;
@@ -246,6 +260,7 @@ ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
             WaitForEventNotification();
         }
     }
+        */
 
     return ndRes;
 }
