@@ -2,6 +2,7 @@
 #include <cassert>
 #include <iostream>
 
+
 template<typename T>
 void SafeRelease(T*& p) {
     if (p != nullptr) {
@@ -13,7 +14,7 @@ void SafeRelease(T*& p) {
 // MARK: NDSessionBase
 NDSessionBase::NDSessionBase() :
     m_pAdapter(nullptr), m_pMr(nullptr), m_pCq(nullptr), m_pQp(nullptr), m_pConnector(nullptr), m_hAdapterFile(nullptr),
-    m_Buf(nullptr), m_pMw(nullptr)
+    m_Buf(nullptr), m_pMw(nullptr), m_Buf_Len(0)
 {
     RtlZeroMemory(&m_Ov, sizeof(m_Ov));
 }
@@ -27,7 +28,7 @@ NDSessionBase::~NDSessionBase() {
     if (m_hAdapterFile) CloseHandle(m_hAdapterFile);
     SafeRelease(m_pAdapter);
     if (m_Buf) {
-        VirtualFree(m_Buf, 0, MEM_RELEASE);
+        HeapFree(GetProcessHeap(), 0, m_Buf);
         m_Buf = nullptr;
     }
 }
@@ -38,8 +39,23 @@ HRESULT NDSessionBase::CreateMR() {
 }
 
 HRESULT NDSessionBase::RegisterDataBuffer(DWORD bufferLength, ULONG type) {
+    if (m_Buf) {
+        HRESULT hr = m_pMr->Deregister(&m_Ov);
+        if (hr == ND_PENDING) {
+            hr = m_pMr->GetOverlappedResult(&m_Ov, true);
+        } else if (FAILED(hr)) {
+            std::cerr << "Failed to deregister memory region: " << std::hex << hr << std::endl;
+            #ifdef _DEBUG
+            abort();
+            #endif
+            return hr;
+        }
+        HeapFree(GetProcessHeap(), 0, m_Buf);
+        m_Buf = nullptr;
+    }
+
     m_Buf_Len = bufferLength;
-    m_Buf = VirtualAlloc(nullptr, m_Buf_Len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    m_Buf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, m_Buf_Len);
     if (!m_Buf) {
         std::cerr << "Failed to allocate memory for buffer." << std::endl;
         return E_OUTOFMEMORY;
@@ -238,9 +254,12 @@ void NDSessionBase::WaitForEventNotification() {
 ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
     ND2_RESULT ndRes;
 
-    if (m_pCq->GetResults(&ndRes, 1) == 1) {
+    ULONG numRes = m_pCq->GetResults(&ndRes, 1);
+
+    if (numRes == 1) {
         return ndRes;
     }
+    else if (numRes > 1) abort();
 
     if (!bBlocking) {
         ndRes.Status = ND_PENDING;
@@ -276,6 +295,9 @@ bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext) {
     }
     if (expectedContext != ndRes.RequestContext) {
         std::cerr << "Unexpected completion" << std::endl;
+        #ifdef _DEBUG
+        abort();
+        #endif
         return false;
     }
 
@@ -295,6 +317,14 @@ HRESULT NDSessionBase::FlushQP() {
 HRESULT NDSessionBase::Reject(const void *pPrivateData, DWORD cbPrivateData) {
     HRESULT hr = m_pConnector->Reject(pPrivateData, cbPrivateData);
     return hr;
+}
+
+void NDSessionBase::ClearOPs() {
+    FlushQP();
+    while (true) {
+        ND2_RESULT result = WaitForCompletion(false);
+        if (result.Status == ND_NO_MORE_ENTRIES || result.Status == ND_PENDING) break;
+    }
 }
 
 // MARK: NDSessionServerBase
