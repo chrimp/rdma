@@ -33,17 +33,8 @@ void ShowUsage() {
            "\t-c <local_ip> <server_ip> - Start as client\n");
 }
 
-struct PeerInfo {
-    UINT32 m_remoteToken;
-    UINT64 m_remoteAddress;
-};
-
 // A simple server implementation using your base class
 class TestServer : public NDSessionServerBase {
-private:
-    char* m_pBuf = nullptr;
-    ND2_SGE *m_sgl = nullptr;
-
 public:
     bool Setup(char* localAddr) {
         if (!Initialize(localAddr)) return false;
@@ -55,25 +46,11 @@ public:
         if (FAILED(CreateQP(info.MaxReceiveQueueDepth, info.MaxInitiatorQueueDepth, info.MaxReceiveSge, info.MaxInitiatorSge))) return false;
         if (FAILED(CreateMR())) return false;
 
-        m_pBuf = static_cast<char*>(HeapAlloc(GetProcessHeap(), 0, TEST_BUFFER_SIZE));
-        if (!m_pBuf) {
-            std::cerr << "Failed to allocate buffer." << std::endl;
-            return false;
-        }
-        memset(m_pBuf, 0, TEST_BUFFER_SIZE);
-        m_sgl = new (std::nothrow) ND2_SGE[info.MaxReceiveSge];
-        if (m_sgl == nullptr) {
-            std::cerr << "Failed to allocate sgl." << std::endl;
-            HeapFree(GetProcessHeap(), 0, m_pBuf);
-            return false;
-        }
-
         ULONG flags = ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE;
-        if (FAILED(RegisterDataBuffer(m_pBuf, TEST_BUFFER_SIZE, flags))) return false;
-        //if (FAILED(RegisterDataBuffer(TEST_BUFFER_SIZE, ND_MR_FLAG_ALLOW_LOCAL_WRITE))) return false;
+        if (FAILED(RegisterDataBuffer(TEST_BUFFER_SIZE, flags))) return false;
 
         ND2_SGE sge = { 0 };
-        sge.Buffer = m_pBuf;
+        sge.Buffer = m_Buf;
         sge.BufferLength = TEST_BUFFER_SIZE;
         sge.MemoryRegionToken = m_pMr->GetLocalToken();
         PostReceive(&sge, 1, RECV_CTXT);
@@ -103,19 +80,19 @@ public:
         std::cout << "Connection established. Waiting for message from client..." << std::endl;
 
         WaitForCompletionAndCheckContext(RECV_CTXT);
-        std::cout << "Received from client: '" << (char*)m_pBuf << "'" << std::endl;
+        std::cout << "Received from client: '" << (char*)m_Buf << "'" << std::endl;
 
         CreateMW();
-        Bind(m_pBuf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
+        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
         
         ND2_SGE sge = { 0 };
-        sge.Buffer = m_pBuf;
+        sge.Buffer = m_Buf;
         sge.BufferLength = TEST_BUFFER_SIZE;
         sge.MemoryRegionToken = m_pMr->GetLocalToken();
 
         // Send a response
         const char* response = "Message received by server.";
-        strcpy_s((char*)m_pBuf, TEST_BUFFER_SIZE, response);
+        strcpy_s((char*)m_Buf, TEST_BUFFER_SIZE, response);
         sge.BufferLength = (ULONG)strlen(response) + 1;
 
         if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
@@ -135,10 +112,6 @@ public:
 
 // A simple client implementation
 class TestClient : public NDSessionClientBase {
-private:
-    char* m_pBuf = nullptr;
-    ND2_SGE *m_sgl = nullptr;
-
 public:
     bool Setup(char* localAddr) {
         if (!Initialize(localAddr)) return false;
@@ -150,34 +123,16 @@ public:
         if (FAILED(CreateQP(info.MaxReceiveQueueDepth, info.MaxInitiatorQueueDepth, info.MaxReceiveSge, info.MaxInitiatorSge))) return false;
         if (FAILED(CreateMR())) return false;
 
-        m_pBuf = static_cast<char*>(HeapAlloc(GetProcessHeap(), 0, TEST_BUFFER_SIZE));
-        if (!m_pBuf) {
-            std::cerr << "Failed to allocate buffer." << std::endl;
-            return false;
-        }
-        memset(m_pBuf, 0, TEST_BUFFER_SIZE);
-        m_sgl = new (std::nothrow) ND2_SGE[info.MaxInitiatorSge];
-        if (m_sgl == nullptr) {
-            std::cerr << "Failed to allocate sgl." << std::endl;
-            HeapFree(GetProcessHeap(), 0, m_pBuf);
-            return false;
-        }
-
         ULONG flags = ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE;
-        if (FAILED(RegisterDataBuffer(m_pBuf, TEST_BUFFER_SIZE, flags))) return false;
-
-        //if (FAILED(RegisterDataBuffer(TEST_BUFFER_SIZE, ND_MR_FLAG_ALLOW_LOCAL_WRITE))) return false;
+        if (FAILED(RegisterDataBuffer(TEST_BUFFER_SIZE, flags))) return false;
         if (FAILED(CreateConnector())) return false;
 
         return true;
     }
 
     void Run(const char* localAddr, const char* serverAddr) {
-        //char localAddrWithPort[INET_ADDRSTRLEN + 6];
-        //sprintf_s(localAddrWithPort, "%s", localAddr); // Bind to any port on the specific local IP
-
         ND2_SGE sge = { 0 };
-        sge.Buffer = m_pBuf;
+        sge.Buffer = m_Buf;
         sge.BufferLength = TEST_BUFFER_SIZE;
         sge.MemoryRegionToken = m_pMr->GetLocalToken();
         if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
@@ -201,14 +156,12 @@ public:
         std::cout << "Connection established." << std::endl;
 
         CreateMW();
-        Bind(m_pBuf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
-
-        std::cout << "Buffer address: " << static_cast<void*>(m_pBuf) << ", MR Token: " << std::hex << m_pMr->GetLocalToken() << std::endl;
+        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
 
         // Send a message
         const char* message = "Hello from client.";
-        strcpy_s((char*)m_pBuf, TEST_BUFFER_SIZE, message);
-        sge = { m_pBuf, (ULONG)strlen(message) + 1, m_pMr->GetLocalToken() };
+        strcpy_s((char*)m_Buf, TEST_BUFFER_SIZE, message);
+        sge = { m_Buf, (ULONG)strlen(message) + 1, m_pMr->GetLocalToken() };
 
         if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
             std::cerr << "Send failed." << std::endl;
@@ -233,7 +186,7 @@ public:
             return;
         }
 
-        std::cout << "Received from server: '" << (char*)m_pBuf << "'" << std::endl;
+        std::cout << "Received from server: '" << (char*)m_Buf << "'" << std::endl;
         Shutdown();
     }
 };
