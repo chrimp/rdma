@@ -2,6 +2,7 @@
 #include <cassert>
 #include <iostream>
 
+
 template<typename T>
 void SafeRelease(T*& p) {
     if (p != nullptr) {
@@ -38,6 +39,21 @@ HRESULT NDSessionBase::CreateMR() {
 }
 
 HRESULT NDSessionBase::RegisterDataBuffer(DWORD bufferLength, ULONG type) {
+    if (m_Buf) {
+        HRESULT hr = m_pMr->Deregister(&m_Ov);
+        if (hr == ND_PENDING) {
+            hr = m_pMr->GetOverlappedResult(&m_Ov, true);
+        } else if (FAILED(hr)) {
+            std::cerr << "Failed to deregister memory region: " << std::hex << hr << std::endl;
+            #ifdef _DEBUG
+            abort();
+            #endif
+            return hr;
+        }
+        VirtualFree(m_Buf, 0, MEM_RELEASE);
+        m_Buf = nullptr;
+    }
+
     m_Buf_Len = bufferLength;
     m_Buf = VirtualAlloc(nullptr, m_Buf_Len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!m_Buf) {
@@ -276,6 +292,9 @@ bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext) {
     }
     if (expectedContext != ndRes.RequestContext) {
         std::cerr << "Unexpected completion" << std::endl;
+        #ifdef _DEBUG
+        abort();
+        #endif
         return false;
     }
 

@@ -1,22 +1,6 @@
 ﻿#include "NDSession.hpp"
 #include <iostream>
 
-/*
-* ======================================================================
-* NOTICE: This code contains substantial AI-generated content based on
-* human-provided prompts, specifications, or design inputs.
-*
-* The code is provided as-is without warranty or guarantee of accuracy.
-* AI-generated portions have not been thoroughly reviewed and may
-* contain errors, logical flaws, or incomplete implementations.
-*
-* You are responsible for thorough review, testing, and validation
-* before use. Exercise caution and comprehensive testing practices,
-* as AI-generated code may introduce subtle issues not immediately
-* apparent.
-* ======================================================================
-*/
-
 constexpr int TEST_BUFFER_SIZE = 1024;
 constexpr char TEST_PORT[] = "54321";
 
@@ -24,6 +8,11 @@ constexpr char TEST_PORT[] = "54321";
 #define SEND_CTXT ((void*)0x2000)
 #define READ_CTXT ((void*)0x3000)
 #define WRITE_CTXT ((void*)0x4000)
+
+struct PeerInfo {
+    UINT64 remoteAddr;
+    UINT32 remoteToken;
+};
 
 
 void ShowUsage() {
@@ -33,7 +22,7 @@ void ShowUsage() {
            "\t-c <local_ip> <server_ip> - Start as client\n");
 }
 
-// A simple server implementation using your base class
+// MARK: TestServer
 class TestServer : public NDSessionServerBase {
 public:
     bool Setup(char* localAddr) {
@@ -105,12 +94,85 @@ public:
             return;
         }
 
-        std::cout << "Response sent. Shutting down." << std::endl;
+        std::cout << "Response sent. Waiting for client's PeerInfo..." << std::endl;
+
+        InvalidateMW();
+        WaitForCompletion(true);
+        HRESULT hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE);
+        if (FAILED(hr)) {
+            abort();
+        }
+        
+        CreateMW();
+        Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
+        WaitForCompletion(true);
+
+        PeerInfo* remoteInfo = reinterpret_cast<PeerInfo*>(m_Buf);
+        ND2_SGE peerSge = { m_Buf, sizeof(PeerInfo), m_pMr->GetLocalToken() };
+        if (FAILED(PostReceive(&peerSge, 1, RECV_CTXT))) {
+            std::cerr << "PostReceive for PeerInfo failed." << std::endl;
+            return;
+        }
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+            std::cerr << "WaitForCompletion for PeerInfo failed." << std::endl;
+            return;
+        }
+
+        std::cout << "Received PeerInfo from client: remoteAddr = " << remoteInfo->remoteAddr
+                  << ", remoteToken = " << remoteInfo->remoteToken << std::endl;
+
+        // Echo back the PeerInfo
+        if (FAILED(Send(&peerSge, 1, 0, SEND_CTXT))) {
+            std::cerr << "Send of PeerInfo failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
+            std::cerr << "WaitForCompletion for PeerInfo send failed." << std::endl;
+            return;
+        }
+
+        std::cout << "Echoed PeerInfo back to client. Sending my PeerInfo..." << std::endl;
+        
+        PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
+        myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
+        myInfo->remoteToken = m_pMr->GetLocalToken();
+
+        if (FAILED(Send(&peerSge, 1, 0, SEND_CTXT))) {
+            std::cerr << "Send of my PeerInfo failed." << std::endl;
+            return;
+        }
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
+            std::cerr << "WaitForCompletion for my PeerInfo send failed." << std::endl;
+            return;
+        }
+
+        std::cout << "My PeerInfo sent to client. Waiting for echo..." << std::endl;
+
+        if (FAILED(PostReceive(&peerSge, 1, RECV_CTXT))) {
+            std::cerr << "PostReceive for echoed PeerInfo failed." << std::endl;
+            return;
+        }
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+            std::cerr << "WaitForCompletion for echoed PeerInfo receive failed." << std::endl;
+            return;
+        }
+
+        // Compare the received PeerInfo
+        bool conditionOne = (myInfo->remoteAddr == reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr);
+        bool conditionTwo = (myInfo->remoteToken == reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken);
+
+        if (!(conditionOne && conditionTwo)) {
+            std::cerr << "Received PeerInfo does not match sent PeerInfo." << std::endl;
+        } else {
+            std::cout << "Received echoed PeerInfo matches sent PeerInfo." << std::endl;
+        }
+
         Shutdown();
     }
 };
 
-// A simple client implementation
+// MARK: TestClient
 class TestClient : public NDSessionClientBase {
 public:
     bool Setup(char* localAddr) {
@@ -187,6 +249,86 @@ public:
         }
 
         std::cout << "Received from server: '" << (char*)m_Buf << "'" << std::endl;
+
+        /*
+        When resizing the buffer:
+        - Invalidate the memory window
+        - Wait for completion of the invalidate operation
+        - Deregister the old memory region
+        - Create a new memory window
+        - Register the new buffer
+        - Bind the new buffer
+        */
+
+        if (FAILED(InvalidateMW())) abort();
+        WaitForCompletion(true);
+        HRESULT hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE | ND_MR_FLAG_ALLOW_REMOTE_READ);
+        if (FAILED(hr)) abort();
+        CreateMW();
+        Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
+
+        PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
+        myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
+        myInfo->remoteToken = m_pMr->GetLocalToken();
+
+        std::cout << "My address: " << myInfo->remoteAddr << ", token: " << myInfo->remoteToken << std::endl;
+
+        sge = { m_Buf, sizeof(PeerInfo), m_pMr->GetLocalToken() };
+        if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
+            std::cerr << "Send failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) { // I/O error here
+            std::cerr << "WaitForCompletion for send failed." << std::endl;
+            return;
+        }
+        std::cout << "Peer information sent. Waiting for echo..." << std::endl;
+
+        if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
+            std::cerr << "PostReceive for PeerInfo failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+            std::cerr << "WaitForCompletion for PeerInfo receive failed." << std::endl;
+            return;
+        }
+
+        // Compare the received PeerInfo
+        bool conditionOne = (myInfo->remoteAddr == reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr);
+        bool conditionTwo = (myInfo->remoteToken == reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken);
+        if (!(conditionOne && conditionTwo)) {
+            std::cerr << "Received PeerInfo does not match sent PeerInfo." << std::endl;
+        }
+
+        std::cout << "Received echoed PeerInfo from server. Waiting for server's PeerInfo..." << std::endl;
+
+        if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
+            std::cerr << "PostReceive for server's PeerInfo failed." << std::endl;
+            return;
+        }
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+            std::cerr << "WaitForCompletion for server's PeerInfo failed." << std::endl;
+            return;
+        }
+
+        PeerInfo* serverInfo = reinterpret_cast<PeerInfo*>(m_Buf);
+        std::cout << "Received server's PeerInfo: remoteAddr = " << serverInfo->remoteAddr
+                    << ", remoteToken = " << serverInfo->remoteToken << std::endl;
+        
+        // Echo back the PeerInfo
+        if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
+            std::cerr << "Send of PeerInfo failed." << std::endl;
+            return;
+        }
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
+            std::cerr << "WaitForCompletion for PeerInfo send failed." << std::endl;
+            return;
+        }
+
+        std::cout << "Echoed PeerInfo back to server. Shutting down." << std::endl;
+
         Shutdown();
     }
 };
@@ -221,7 +363,7 @@ void PrintAvailableRdmaAddresses() {
     for (int i = 0; i < pAddressList->iAddressCount; ++i) {
         char ipStr[INET6_ADDRSTRLEN];
         DWORD ipStrLen = INET6_ADDRSTRLEN;
-        if (WSAAddressToStringA(
+        if (WSAAddressToString(
             pAddressList->Address[i].lpSockaddr,
             pAddressList->Address[i].iSockaddrLength,
             nullptr,
