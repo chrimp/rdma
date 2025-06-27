@@ -40,6 +40,8 @@ class NDSessionBase {
     HRESULT CreateConnector();
     HRESULT CreateQP(DWORD queueDepth, DWORD nSge, DWORD inlineDataSize = 0);
     HRESULT CreateQP(DWORD receiveQueueDepth, DWORD initiatorQueueDepth, DWORD maxReceiveRequestSge, DWORD maxInitiatorRequestSge);
+
+    void ClearOPs();
     
     void DisconnectConnector();
     void DeregisterMemory();

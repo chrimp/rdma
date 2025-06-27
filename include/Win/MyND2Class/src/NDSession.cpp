@@ -14,7 +14,7 @@ void SafeRelease(T*& p) {
 // MARK: NDSessionBase
 NDSessionBase::NDSessionBase() :
     m_pAdapter(nullptr), m_pMr(nullptr), m_pCq(nullptr), m_pQp(nullptr), m_pConnector(nullptr), m_hAdapterFile(nullptr),
-    m_Buf(nullptr), m_pMw(nullptr)
+    m_Buf(nullptr), m_pMw(nullptr), m_Buf_Len(0)
 {
     RtlZeroMemory(&m_Ov, sizeof(m_Ov));
 }
@@ -28,7 +28,7 @@ NDSessionBase::~NDSessionBase() {
     if (m_hAdapterFile) CloseHandle(m_hAdapterFile);
     SafeRelease(m_pAdapter);
     if (m_Buf) {
-        VirtualFree(m_Buf, 0, MEM_RELEASE);
+        HeapFree(GetProcessHeap(), 0, m_Buf);
         m_Buf = nullptr;
     }
 }
@@ -50,12 +50,12 @@ HRESULT NDSessionBase::RegisterDataBuffer(DWORD bufferLength, ULONG type) {
             #endif
             return hr;
         }
-        VirtualFree(m_Buf, 0, MEM_RELEASE);
+        HeapFree(GetProcessHeap(), 0, m_Buf);
         m_Buf = nullptr;
     }
 
     m_Buf_Len = bufferLength;
-    m_Buf = VirtualAlloc(nullptr, m_Buf_Len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    m_Buf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, m_Buf_Len);
     if (!m_Buf) {
         std::cerr << "Failed to allocate memory for buffer." << std::endl;
         return E_OUTOFMEMORY;
@@ -254,9 +254,12 @@ void NDSessionBase::WaitForEventNotification() {
 ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
     ND2_RESULT ndRes;
 
-    if (m_pCq->GetResults(&ndRes, 1) == 1) {
+    ULONG numRes = m_pCq->GetResults(&ndRes, 1);
+
+    if (numRes == 1) {
         return ndRes;
     }
+    else if (numRes > 1) abort();
 
     if (!bBlocking) {
         ndRes.Status = ND_PENDING;
@@ -314,6 +317,14 @@ HRESULT NDSessionBase::FlushQP() {
 HRESULT NDSessionBase::Reject(const void *pPrivateData, DWORD cbPrivateData) {
     HRESULT hr = m_pConnector->Reject(pPrivateData, cbPrivateData);
     return hr;
+}
+
+void NDSessionBase::ClearOPs() {
+    FlushQP();
+    while (true) {
+        ND2_RESULT result = WaitForCompletion(false);
+        if (result.Status == ND_NO_MORE_ENTRIES || result.Status == ND_PENDING) break;
+    }
 }
 
 // MARK: NDSessionServerBase

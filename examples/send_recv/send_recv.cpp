@@ -43,7 +43,7 @@ public:
         sge.BufferLength = TEST_BUFFER_SIZE;
         sge.MemoryRegionToken = m_pMr->GetLocalToken();
         PostReceive(&sge, 1, RECV_CTXT);
-        PostReceive(&sge, 1, RECV_CTXT);
+        //PostReceive(&sge, 1, RECV_CTXT);
 
         if (FAILED(CreateListener())) return false;
         if (FAILED(CreateConnector())) return false;
@@ -94,20 +94,27 @@ public:
             return;
         }
 
+        ND2_RESULT sendRes = WaitForCompletion(false);
+        if (sendRes.Status != ND_PENDING) abort();
+
         std::cout << "Response sent. Waiting for client's PeerInfo..." << std::endl;
 
         InvalidateMW();
         WaitForCompletion(true);
-        HRESULT hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE);
-        if (FAILED(hr)) {
-            abort();
-        }
-        
-        CreateMW();
-        Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
-        WaitForCompletion(true);
+        HRESULT hr = CreateMW();
+        if (FAILED(hr)) abort();
+        hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_REMOTE_READ | ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE);
+        if (FAILED(hr)) abort();
 
-        PeerInfo* remoteInfo = reinterpret_cast<PeerInfo*>(m_Buf);
+        std::variant<HRESULT, ND2_RESULT> bindRes = Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
+        if (std::holds_alternative<HRESULT>(bindRes)) {
+            HRESULT bindHr = std::get<HRESULT>(bindRes);
+            if (FAILED(bindHr)) abort();
+        } else {
+            ND2_RESULT ndRes = std::get<ND2_RESULT>(bindRes);
+            if (ndRes.Status != ND_SUCCESS) abort();
+        }
+
         ND2_SGE peerSge = { m_Buf, sizeof(PeerInfo), m_pMr->GetLocalToken() };
         if (FAILED(PostReceive(&peerSge, 1, RECV_CTXT))) {
             std::cerr << "PostReceive for PeerInfo failed." << std::endl;
@@ -117,7 +124,8 @@ public:
             std::cerr << "WaitForCompletion for PeerInfo failed." << std::endl;
             return;
         }
-
+        
+        PeerInfo* remoteInfo = reinterpret_cast<PeerInfo*>(m_Buf);
         std::cout << "Received PeerInfo from client: remoteAddr = " << remoteInfo->remoteAddr
                   << ", remoteToken = " << remoteInfo->remoteToken << std::endl;
 
@@ -250,6 +258,11 @@ public:
 
         std::cout << "Received from server: '" << (char*)m_Buf << "'" << std::endl;
 
+        ND2_RESULT res = WaitForCompletion(false);
+        if (res.Status == ND_PENDING) {
+            std::cout << "There's no more pending operations." << std::endl;
+        }
+
         /*
         When resizing the buffer:
         - Invalidate the memory window
@@ -260,12 +273,21 @@ public:
         - Bind the new buffer
         */
 
+        Sleep(1000); // Sleeping here fixes Data R/W error, but why?
+        
         if (FAILED(InvalidateMW())) abort();
         WaitForCompletion(true);
+        CreateMW();
         HRESULT hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE | ND_MR_FLAG_ALLOW_REMOTE_READ);
         if (FAILED(hr)) abort();
-        CreateMW();
-        Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
+        std::variant<HRESULT, ND2_RESULT> bindRes = Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
+        if (std::holds_alternative<HRESULT>(bindRes)) {
+            HRESULT bindHr = std::get<HRESULT>(bindRes);
+            if (FAILED(bindHr)) abort();
+        } else {
+            ND2_RESULT ndRes = std::get<ND2_RESULT>(bindRes);
+            if (ndRes.Status != ND_SUCCESS) abort();
+        }
 
         PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
@@ -279,18 +301,22 @@ public:
             return;
         }
 
-        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) { // I/O error here
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
             std::cerr << "WaitForCompletion for send failed." << std::endl;
             return;
         }
+
         std::cout << "Peer information sent. Waiting for echo..." << std::endl;
+
+        ZeroMemory(m_Buf, sizeof(PeerInfo)); // Clear the buffer before receiving
+        sge = { m_Buf, sizeof(PeerInfo), m_pMr->GetLocalToken() };
 
         if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
             std::cerr << "PostReceive for PeerInfo failed." << std::endl;
             return;
         }
 
-        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) { // ND_INVALID_ACCESS here
             std::cerr << "WaitForCompletion for PeerInfo receive failed." << std::endl;
             return;
         }
