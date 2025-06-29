@@ -6,8 +6,19 @@
 #include <WS2tcpip.h>
 #include <ndsupport.h>
 #include <variant>
+#include <iostream>
 
 class NDSessionBase {
+    public:
+    void CheckForOPs() {
+        ND2_RESULT ndRes = WaitForCompletion(false);
+        if (ndRes.Status != ND_PENDING) {
+            std::cout << "There are pending operations: " << ndRes.RequestType << std::endl;
+        } else {
+            std::cout << "There are no pending operations." << std::endl;
+        }
+    }
+
     protected:
     IND2Adapter *m_pAdapter;
     IND2MemoryRegion *m_pMr;

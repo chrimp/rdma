@@ -46,7 +46,7 @@ HRESULT NDSessionBase::RegisterDataBuffer(DWORD bufferLength, ULONG type) {
         } else if (FAILED(hr)) {
             std::cerr << "Failed to deregister memory region: " << std::hex << hr << std::endl;
             #ifdef _DEBUG
-            abort();
+            //abort();
             #endif
             return hr;
         }
