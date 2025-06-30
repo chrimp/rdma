@@ -101,25 +101,6 @@ public:
 
         std::cout << "Response sent. Waiting for client's PeerInfo..." << std::endl;
 
-        /*
-        InvalidateMW();
-        WaitForCompletion(true);
-        HRESULT hr = CreateMW();
-        if (FAILED(hr)) abort();
-        hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_REMOTE_READ | ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE);
-        if (FAILED(hr)) abort();
-        
-
-        std::variant<HRESULT, ND2_RESULT> bindRes = Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
-        if (std::holds_alternative<HRESULT>(bindRes)) {
-            HRESULT bindHr = std::get<HRESULT>(bindRes);
-            if (FAILED(bindHr)) abort();
-        } else {
-            ND2_RESULT ndRes = std::get<ND2_RESULT>(bindRes);
-            if (ndRes.Status != ND_SUCCESS) abort();
-        }
-        */
-
         sge = { m_Buf, TEST_BUFFER_SIZE, m_pMr->GetLocalToken() };
         if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
             std::cerr << "PostReceive for PeerInfo failed." << std::endl;
@@ -134,35 +115,7 @@ public:
         std::cout << "Received PeerInfo from client: remoteAddr = " << remoteInfo->remoteAddr
                   << ", remoteToken = " << remoteInfo->remoteToken << std::endl;
 
-
-        /*
-        PeerInfo holder = *remoteInfo;
-
-        InvalidateMW();
-        WaitForCompletion(true);
-        CreateMW();
-        hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE | ND_MR_FLAG_ALLOW_REMOTE_READ);
-
-        reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr = holder.remoteAddr;
-        reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken = holder.remoteToken;
-        */
-
-        /*
-        InvalidateMW();
-        WaitForCompletion(true);
-        CreateMW();
-        hr = RegisterDataBuffer(sizeof(TEST_BUFFER_SIZE), ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE | ND_MR_FLAG_ALLOW_REMOTE_READ);
-        Bind(m_Buf, sizeof(TEST_BUFFER_SIZE), ND_OP_FLAG_ALLOW_READ | ND_OP_FLAG_ALLOW_WRITE);
-        
-
-        const char* msg = "line 151";
-        size_t len = strlen(msg) + 1;
-        std::memcpy(m_Buf, msg, len);
-        */
-
         sge = { m_Buf, sizeof(TEST_BUFFER_SIZE), m_pMr->GetLocalToken() };
-
-        //Sleep(1000);
 
         // Echo back the PeerInfo
         if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
@@ -183,7 +136,13 @@ public:
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
         myInfo->remoteToken = m_pMr->GetLocalToken();
 
+        PeerInfo myInfoHolder;
+        myInfoHolder.remoteAddr = myInfo->remoteAddr;
+        myInfoHolder.remoteToken = myInfo->remoteToken;
+
         std::cout << "m_Buf size is " << HeapSize(GetProcessHeap(), 0, m_Buf) << std::endl;
+        std::cout << "Buffer has: " << reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr
+                    << ", " << reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken << std::endl;
 
         sge.BufferLength = TEST_BUFFER_SIZE;
         if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
@@ -207,13 +166,19 @@ public:
         }
 
         // Compare the received PeerInfo
-        bool conditionOne = (myInfo->remoteAddr == reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr);
-        bool conditionTwo = (myInfo->remoteToken == reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken);
+        bool conditionOne = (myInfoHolder.remoteAddr == reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr);
+        bool conditionTwo = (myInfoHolder.remoteToken == reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken);
 
         if (!(conditionOne && conditionTwo)) {
             std::cerr << "Received PeerInfo does not match sent PeerInfo." << std::endl;
+            std::cerr << "Remote address: " << reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr
+                        << ", Remote token: " << reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken << std::endl;
         } else {
             std::cout << "Received echoed PeerInfo matches sent PeerInfo." << std::endl;
+            std::cout << "Remote address: " << reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr
+                        << ", Remote token: " << reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken << std::endl;
+            std::cout << "My address: " << myInfoHolder.remoteAddr <<
+                        ", My token: " << myInfoHolder.remoteToken << std::endl;
         }
 
         Shutdown();
@@ -303,32 +268,6 @@ public:
             std::cout << "There's no more pending operations." << std::endl;
         }
 
-        /*
-        When resizing the buffer:
-        - Invalidate the memory window
-        - Wait for completion of the invalidate operation
-        - Deregister the old memory region
-        - Create a new memory window
-        - Register the new buffer
-        - Bind the new buffer
-        */
-        
-        /*
-        if (FAILED(InvalidateMW())) abort();
-        WaitForCompletion(true);
-        CreateMW();
-        HRESULT hr = RegisterDataBuffer(sizeof(PeerInfo), ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE);
-        if (FAILED(hr)) abort();
-        std::variant<HRESULT, ND2_RESULT> bindRes = Bind(m_Buf, sizeof(PeerInfo), ND_OP_FLAG_ALLOW_WRITE);
-        if (std::holds_alternative<HRESULT>(bindRes)) {
-            HRESULT bindHr = std::get<HRESULT>(bindRes);
-            if (FAILED(bindHr)) abort();
-        } else {
-            ND2_RESULT ndRes = std::get<ND2_RESULT>(bindRes);
-            if (ndRes.Status != ND_SUCCESS) abort();
-        }
-        */
-
         PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
         myInfo->remoteToken = m_pMr->GetLocalToken();
@@ -352,17 +291,7 @@ public:
 
         std::cout << "Peer information sent. Waiting for echo..." << std::endl;
 
-        /*
-        //InvalidateMW();
-        //WaitForCompletion(true);
-        //CreateMW();
-        RegisterDataBuffer(sizeof(TEST_BUFFER_SIZE), ND_MR_FLAG_ALLOW_REMOTE_WRITE | ND_MR_FLAG_ALLOW_LOCAL_WRITE);
-        //Bind(m_Buf, sizeof(TEST_BUFFER_SIZE), ND_OP_FLAG_ALLOW_WRITE);
-        */
-
         sge = { m_Buf, TEST_BUFFER_SIZE, m_pMr->GetLocalToken() };
-        // What is this error, why use sizeof(TEST_BUFFER_SIZE) here?
-        // But why the second receive overruns?
 
         CheckForOPs();
 
@@ -377,8 +306,8 @@ public:
         }
 
         // Compare the received PeerInfo
-        bool conditionOne = (myInfo->remoteAddr == reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr);
-        bool conditionTwo = (myInfo->remoteToken == reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken);
+        bool conditionOne = (myInfoHolder.remoteAddr == reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr);
+        bool conditionTwo = (myInfoHolder.remoteToken == reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken);
         if (!(conditionOne && conditionTwo)) {
             std::cerr << "Received PeerInfo does not match sent PeerInfo." << std::endl;
         } else {
@@ -395,13 +324,16 @@ public:
 
         std::cout << "m_Buf size is " << HeapSize(GetProcessHeap(), 0, m_Buf) << std::endl;
 
-        ZeroMemory(m_Buf, TEST_BUFFER_SIZE);
+        //ZeroMemory(m_Buf, TEST_BUFFER_SIZE);
+        // Clearing the buffer here zeroes the received PeerInfo
+        // Does the API guarantee that the buffer is zeroed before the receive?
+        // If not, how do I ensure that the buffer is clean before receiving, especially when the previous data was larger?
 
         if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
             std::cerr << "PostReceive for server's PeerInfo failed." << std::endl;
             return;
         }
-        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) { // Overrun?
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
             std::cerr << "WaitForCompletion for server's PeerInfo failed." << std::endl;
             return;
         }
