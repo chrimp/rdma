@@ -360,7 +360,7 @@ public:
         //Bind(m_Buf, sizeof(TEST_BUFFER_SIZE), ND_OP_FLAG_ALLOW_WRITE);
         */
 
-        sge = { m_Buf, sizeof(TEST_BUFFER_SIZE), m_pMr->GetLocalToken() };
+        sge = { m_Buf, TEST_BUFFER_SIZE, m_pMr->GetLocalToken() };
         // What is this error, why use sizeof(TEST_BUFFER_SIZE) here?
         // But why the second receive overruns?
 
