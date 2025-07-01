@@ -31,6 +31,8 @@ class NDSessionBase {
     IND2MemoryWindow *m_pMw;
     OVERLAPPED m_Ov;
 
+    size_t m_MaxPerTransfer = 1500;
+
     protected:
     NDSessionBase();
     ~NDSessionBase();

@@ -14,7 +14,7 @@ void SafeRelease(T*& p) {
 // MARK: NDSessionBase
 NDSessionBase::NDSessionBase() :
     m_pAdapter(nullptr), m_pMr(nullptr), m_pCq(nullptr), m_pQp(nullptr), m_pConnector(nullptr), m_hAdapterFile(nullptr),
-    m_Buf(nullptr), m_pMw(nullptr), m_Buf_Len(0)
+    m_Buf_Len(0), m_Buf(nullptr), m_pMw(nullptr)
 {
     RtlZeroMemory(&m_Ov, sizeof(m_Ov));
 }
@@ -135,23 +135,25 @@ bool NDSessionBase::Initialize(char* localAddr) {
     HRESULT hr = NdOpenAdapter(IID_IND2Adapter, reinterpret_cast<const struct sockaddr*>(&addr), sizeof(addr), reinterpret_cast<void**>(&m_pAdapter));
         if (hr == ND_INVALID_ADDRESS) {
         std::cerr << "ND_INVALID_ADDRESS: The specified IP does not correspond to an RDMA-capable adapter for NDv2." << std::endl;
-        
-        // --- DIAGNOSTIC: Try opening with NDv1 ---
-        INDAdapter* pV1Adapter = nullptr;
-        HRESULT hrV1 = NdOpenAdapter(IID_INDAdapter, reinterpret_cast<const struct sockaddr*>(&addr), sizeof(addr), reinterpret_cast<void**>(&pV1Adapter));
-        if (SUCCEEDED(hrV1)) {
-            std::cerr << "DIAGNOSTIC SUCCESS: Adapter opened successfully with NetworkDirect v1 (IID_INDAdapter)." << std::endl;
-            std::cerr << "This indicates the NDv2 provider on your system is faulty or misconfigured." << std::endl;
-            pV1Adapter->Release();
-        } else {
-            std::cerr << "DIAGNOSTIC FAILURE: Failed to open adapter with NDv1 as well. Error: " << std::hex << hrV1 << std::endl;
-        }
-        abort();
+        return false;
     }
+
     if (FAILED(hr)) {
         std::cerr << "Failed to open adapter: " << std::hex << hr << std::endl;
         return false;
     }
+
+    ND2_ADAPTER_INFO info = { 0 };
+    info.InfoVersion = ND_VERSION_2;
+    ULONG adapterInfoSize = sizeof(info);
+    hr = m_pAdapter->Query(&info, &adapterInfoSize);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to query adapter info: " << std::hex << hr << std::endl;
+        SafeRelease(m_pAdapter);
+        return false;
+    }
+
+    m_MaxPerTransfer = info.MaxTransferLength;
 
     m_Ov.hEvent = CreateEvent(nullptr, false, false, nullptr);
     if (m_Ov.hEvent == nullptr) {
@@ -286,6 +288,12 @@ ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
 
 bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext) {
     ND2_RESULT ndRes = WaitForCompletion(true);
+
+    if (ndRes.Status == ND_CANCELED) {
+        std::cout << "Remote has closed the connection." << std::endl;
+        return false;
+    }
+
     if (ND_SUCCESS != ndRes.Status) {
         std::cerr << "Operation failed with status: " << std::hex << ndRes.Status << std::endl;
         #ifdef _DEBUG
