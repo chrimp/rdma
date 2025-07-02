@@ -115,6 +115,54 @@ public:
             return;
         }
 
+        // Block until client sends
+        sge.BufferLength = TEST_BUFFER_SIZE;
+
+        if (FAILED(PostReceive(nullptr, 0, RECV_CTXT))) {
+            std::cerr << "PostReceive for client's PeerInfo failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+            std::cerr << "WaitForCompletion for client's PeerInfo failed." << std::endl;
+            return;
+        }
+
+        // Attempt zero-byte write to client's buffer (no SGE)
+        std::cout << "Attempting zero-byte RMA" << std::endl;
+        if (FAILED(Write(nullptr, 0, remoteInfo->remoteAddr, remoteInfo->remoteToken, 0, WRITE_CTXT))) {
+            std::cerr << "Write failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
+            std::cerr << "WaitForCompletion for zero-byte write failed." << std::endl;
+            return;
+        }
+
+        if (FAILED(Read(nullptr, 0, remoteInfo->remoteAddr, remoteInfo->remoteToken, 0, READ_CTXT))) {
+            std::cerr << "Read failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(READ_CTXT)) {
+            std::cerr << "WaitForCompletion for zero-byte read failed." << std::endl;
+            return;
+        }
+
+        std::cout << "Zero-byte RMA operations completed successfully." << std::endl;
+
+        // Send a message to the client to indicate completion
+        if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
+            std::cerr << "Send completion message failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
+            std::cerr << "WaitForCompletion for completion message failed." << std::endl;
+            return;
+        }
+
         Shutdown();
     }
 };
@@ -216,7 +264,7 @@ public:
 
         // Attempt zero-byte write to server's buffer (no SGE)
 
-        std::cout << "Attempting zero-byte write to server's buffer..." << std::endl;
+        std::cout << "Attempting zero-byte RMA" << std::endl;
         if (FAILED(Write(nullptr, 0, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, WRITE_CTXT))) {
             std::cerr << "Write failed." << std::endl;
             return;
@@ -227,7 +275,38 @@ public:
             return;
         }
 
-        std::cout << "Zero-byte write to server's buffer succeeded." << std::endl;
+        if (FAILED(Read(nullptr, 0, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, READ_CTXT))) {
+            std::cerr << "Read failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(READ_CTXT)) {
+            std::cerr << "WaitForCompletion for zero-byte read failed." << std::endl;
+            return;
+        }
+
+        std::cout << "Zero-byte RMA operations completed successfully." << std::endl;
+
+        // Send a message to the server to indicate completion
+        if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
+            std::cerr << "Final send failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
+            std::cerr << "WaitForCompletion for final send failed." << std::endl;
+            return;
+        }
+
+        // Wait until server runs RMA operations
+        if (FAILED(PostReceive(nullptr, 0, RECV_CTXT))) {
+            std::cerr << "PostReceive for server's RMA operations failed." << std::endl;
+            return;
+        }
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+            std::cerr << "WaitForCompletion for server's RMA operations failed." << std::endl;
+            return;
+        }
 
         Shutdown();
     }
