@@ -1,5 +1,7 @@
 #include "NDSession.hpp"
 #include <iostream>
+#include <thread>
+#include <chrono>
 
 constexpr int TEST_BUFFER_SIZE = 10240;
 constexpr char TEST_PORT[] = "54321";
@@ -67,11 +69,11 @@ public:
         std::cout << "Accepting connection..." << std::endl;
         if (FAILED(Accept(1, 1, nullptr, 0))) return;
         
-        std::cout << "Connection established. Waiting for client's PeerInfo..." << std::endl;
-        std::cout << "My address: " << reinterpret_cast<UINT64>(m_Buf) << ", token: " << m_pMw->GetRemoteToken() << std::endl;
-
         CreateMW();
         Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
+
+        std::cout << "Connection established. Waiting for client's PeerInfo..." << std::endl;
+        std::cout << "My address: " << reinterpret_cast<UINT64>(m_Buf) << ", token: " << m_pMw->GetRemoteToken() << std::endl;
         
         ND2_SGE sge = { 0 };
         sge.Buffer = m_Buf;
@@ -175,6 +177,8 @@ public:
 
         std::cout << "My address: " << myInfo->remoteAddr << ", token: " << myInfo->remoteToken << std::endl;
 
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
         sge = { m_Buf, sizeof(PeerInfo), m_pMr->GetLocalToken() };
         if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
             std::cerr << "Send failed." << std::endl;
@@ -217,6 +221,13 @@ public:
             std::cerr << "Write failed." << std::endl;
             return;
         }
+
+        if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
+            std::cerr << "WaitForCompletion for zero-byte write failed." << std::endl;
+            return;
+        }
+
+        std::cout << "Zero-byte write to server's buffer succeeded." << std::endl;
 
         Shutdown();
     }
