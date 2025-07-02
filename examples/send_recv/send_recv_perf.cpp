@@ -8,8 +8,7 @@
 #undef max
 #undef min
 
-#define TEST_THROUGHPUT
-
+//#define TEST_THROUGHPUT
 
 constexpr char TEST_PORT[] = "54321";
 
@@ -131,7 +130,6 @@ public:
         std::cout << "TEST 1: Throughput Receive Test (Client -> Server)" << std::endl;
         std::cout << "Receiving " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE) << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
 
-        uint64_t totalReceived = 0;
         auto startTime = std::chrono::high_resolution_clock::now();
 
         // First loop: Batch-post all receives
@@ -153,21 +151,14 @@ public:
                 std::cerr << "WaitForCompletion failed in throughput test." << std::endl;
                 return;
             }
-            
-            totalReceived += CHUNK_SIZE;
-            
-            if ((chunk + 1) % 1000 == 0) {
-                std::cout << "  Completed " << (chunk + 1) << "/" << NUM_CHUNKS << " chunks (" 
-                        << (totalReceived / (1024*1024)) << " MB)" << std::endl;
-            }
         }
         
         auto endTime = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
         
-        double gbps = CalculateGbps(totalReceived, duration.count());
+        double gbps = CalculateGbps(THROUGHPUT_TEST_SIZE, duration.count());
         std::cout << std::fixed << std::setprecision(2);
-        std::cout << "  Results - Received: " << totalReceived << " bytes (" << (totalReceived / (1024*1024)) << "MB)" << std::endl;
+        std::cout << "  Results - Received: " << THROUGHPUT_TEST_SIZE << " bytes (" << (THROUGHPUT_TEST_SIZE / (1024*1024)) << "MB)" << std::endl;
         std::cout << "  Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
         std::cout << "  Throughput: " << gbps << " Gbps" << std::endl;
 
@@ -180,16 +171,18 @@ public:
 
         uint64_t totalSent = 0;
         startTime = std::chrono::high_resolution_clock::now();
+
+        // Only set memory once
+        memset(m_Buf, 0xAB, TEST_BUFFER_SIZE);
+
+        std::string chunkSizeStr = FormatBytes(CHUNK_SIZE);
         
         for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
-            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << (CHUNK_SIZE / (1024*1024*1024)) << "GB)..." << std::endl;
+            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << chunkSizeStr << ")..." << std::endl;
             
             uint64_t chunkSent = 0;
             while (chunkSent < CHUNK_SIZE) {
                 size_t sendSize = std::min(static_cast<size_t>(TEST_BUFFER_SIZE), static_cast<size_t>(CHUNK_SIZE - chunkSent));
-                
-                // Fill buffer with test pattern for this segment
-                memset(m_Buf, 0xAB + chunk, sendSize);
                 
                 // Use SGE to control actual transfer size, not buffer size
                 sge = { m_Buf, static_cast<ULONG>(sendSize), m_pMr->GetLocalToken() };
@@ -207,7 +200,7 @@ public:
                 totalSent += sendSize;
             }
             
-            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << (totalSent / (1024*1024*1024)) << " GB" << std::endl;
+            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << FormatBytes(totalSent) << std::endl;
         }
         
         endTime = std::chrono::high_resolution_clock::now();
@@ -223,6 +216,16 @@ public:
         // Test 3: RTT Test (Server responds to pings)
         std::cout << "\nTEST 3: Round-Trip Time Test (Server responding to pings)" << std::endl;
         std::cout << "Responding to " << RTT_TEST_ITERATIONS << " ping-pong iterations..." << std::endl;
+
+        // Two postreceives to create some room
+
+        sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
+        HRESULT one = PostReceive(&sge, 1, RECV_CTXT);
+        HRESULT two = PostReceive(&sge, 1, RECV_CTXT);
+        if (FAILED(one) || FAILED(two)) {
+            std::cerr << "PostReceive failed in RTT test." << std::endl;
+            return;
+        }
         
         for (uint32_t i = 0; i < RTT_TEST_ITERATIONS; i++) {
             std::cout << "  Waiting for ping " << (i + 1) << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
@@ -239,10 +242,10 @@ public:
                 return;
             }
             
-            std::cout << "  Received ping " << (i + 1) << ", sending pong back..." << std::endl;
+            //std::cout << "  Received ping " << (i + 1) << ", sending pong back..." << std::endl;
             
             // Send pong back to client
-            if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
+            if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE, SEND_CTXT))) {
                 std::cerr << "Send failed in RTT test." << std::endl;
                 return;
             }
@@ -251,13 +254,7 @@ public:
                 return;
             }
             
-            std::cout << "  Ping-pong " << (i + 1) << " completed. Waiting 500ms..." << std::endl;
-
-            auto waitStart = std::chrono::high_resolution_clock::now();
-            while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - waitStart).count() < 500) {
-                // Busy wait for 500ms
-                continue;
-            }
+            std::cout << "  Ping-pong " << (i + 1) << " completed." << std::endl;
         }
         
         std::cout << "  RTT test completed on server side" << std::endl;
@@ -322,16 +319,17 @@ public:
 
         uint64_t totalSent = 0;
         auto startTime = std::chrono::high_resolution_clock::now();
+
+        // Only set memory once
+        memset(m_Buf, 0xAB, TEST_BUFFER_SIZE);
+        std::string chunkSizeStr = FormatBytes(CHUNK_SIZE);
         
         for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
-            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << (CHUNK_SIZE / (1024*1024*1024)) << "GB)..." << std::endl;
+            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << chunkSizeStr << ")..." << std::endl;
             
             uint64_t chunkSent = 0;
             while (chunkSent < CHUNK_SIZE) {
                 size_t sendSize = std::min(static_cast<size_t>(TEST_BUFFER_SIZE), static_cast<size_t>(CHUNK_SIZE - chunkSent));
-                
-                // Fill buffer with test pattern for this segment
-                memset(m_Buf, 0xCD + chunk, sendSize);
                 
                 // Use SGE to control actual transfer size, not buffer size
                 sge = { m_Buf, static_cast<ULONG>(sendSize), m_pMr->GetLocalToken() };
@@ -349,7 +347,7 @@ public:
                 totalSent += sendSize;
             }
             
-            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << (totalSent / (1024*1024*1024)) << " GB" << std::endl;
+            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << FormatBytes(totalSent) << std::endl;
         }
         
         auto endTime = std::chrono::high_resolution_clock::now();
@@ -364,10 +362,9 @@ public:
         // Test 2: Throughput Receive Test (Server -> Client)
         std::cout << "TEST 2: Throughput Receive Test (Server -> Client)" << std::endl;
         std::cout << "Receiving " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE) << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
-
-        uint64_t totalReceived = 0;
-        startTime = std::chrono::high_resolution_clock::now();
         
+        startTime = std::chrono::high_resolution_clock::now();
+
         // First loop: Batch-post all receives
         for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
             sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
@@ -387,21 +384,14 @@ public:
                 std::cerr << "WaitForCompletion failed in throughput test." << std::endl;
                 return;
             }
-            
-            totalReceived += CHUNK_SIZE;
-            
-            if ((chunk + 1) % 1000 == 0) {
-                std::cout << "  Completed " << (chunk + 1) << "/" << NUM_CHUNKS << " chunks (" 
-                        << (totalReceived / (1024*1024)) << " MB)" << std::endl;
-            }
         }
         
         endTime = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
         
-        gbps = CalculateGbps(totalReceived, duration.count());
+        gbps = CalculateGbps(THROUGHPUT_TEST_SIZE, duration.count());
         std::cout << std::fixed << std::setprecision(2);
-        std::cout << "  Results - Received: " << totalReceived << " bytes (" << (totalReceived / (1024*1024*1024)) << " GB)" << std::endl;
+        std::cout << "  Results - Received: " << THROUGHPUT_TEST_SIZE << " bytes (" << (THROUGHPUT_TEST_SIZE / (1024*1024*1024)) << " GB)" << std::endl;
         std::cout << "  Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
         std::cout << "  Throughput: " << gbps << " Gbps" << std::endl;
         #endif // TEST_THROUGHPUT
@@ -412,6 +402,15 @@ public:
         
         std::vector<uint64_t> rttMeasurements;
         rttMeasurements.reserve(RTT_TEST_ITERATIONS);
+
+        // PostReceive twice to create some room
+        sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
+        HRESULT one = PostReceive(&sge, 1, RECV_CTXT);
+        HRESULT two = PostReceive(&sge, 1, RECV_CTXT);
+        if (FAILED(one) || FAILED(two)) {
+            std::cerr << "PostReceive failed in RTT test." << std::endl;
+            return;
+        }
         
         for (uint32_t i = 0; i < RTT_TEST_ITERATIONS; i++) {
             std::cout << "  Starting ping-pong " << (i + 1) << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
@@ -419,18 +418,11 @@ public:
             // Fill buffer with test pattern
             memset(m_Buf, 0xEF, RTT_TEST_SIZE);
             sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
-
-            // Wait momentarily to allow server to post receive
-            auto waitStart = std::chrono::high_resolution_clock::now();
-            while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - waitStart).count() < 10) {
-                // Busy wait for 10ms
-                continue;
-            }
             
             auto rttStart = std::chrono::high_resolution_clock::now();
             
             // Send ping to server
-            if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
+            if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE, SEND_CTXT))) {
                 std::cerr << "Send failed in RTT test." << std::endl;
                 return;
             }
@@ -443,7 +435,7 @@ public:
                 return;
             }
             
-            std::cout << "  Ping " << (i + 1) << " sent, waiting for pong..." << std::endl;
+            //std::cout << "  Ping " << (i + 1) << " sent, waiting for pong..." << std::endl;
             
             // Receive pong from server
 
@@ -456,15 +448,7 @@ public:
             auto rttTime = std::chrono::duration_cast<std::chrono::nanoseconds>(rttEnd - rttStart);
             rttMeasurements.push_back(rttTime.count());
             
-            std::cout << "  Ping-pong " << (i + 1) << " completed. RTT: " << CalculateLatencyMicroseconds(rttTime.count()) << " μs. Waiting 500ms..." << std::endl;
-            //std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            // Use busy wait instead of sleep to allow I/O handling
-            // Do not block the thread ND2 is running on; results in IO timeout on peer
-            waitStart = std::chrono::high_resolution_clock::now();
-            while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - waitStart).count() < 500) {
-                // Busy wait for 500ms
-                continue;
-            }
+            std::cout << "  Ping-pong " << (i + 1) << " completed. RTT: " << CalculateLatencyMicroseconds(rttTime.count()) << " μs." << std::endl;
         }
         
         // Calculate RTT statistics
