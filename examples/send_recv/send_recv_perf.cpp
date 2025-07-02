@@ -131,7 +131,6 @@ public:
         std::cout << "TEST 1: Throughput Receive Test (Client -> Server)" << std::endl;
         std::cout << "Receiving " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE) << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
 
-        uint64_t totalReceived = 0;
         auto startTime = std::chrono::high_resolution_clock::now();
 
         // First loop: Batch-post all receives
@@ -153,21 +152,14 @@ public:
                 std::cerr << "WaitForCompletion failed in throughput test." << std::endl;
                 return;
             }
-            
-            totalReceived += CHUNK_SIZE;
-            
-            if ((chunk + 1) % 1000 == 0) {
-                std::cout << "  Completed " << (chunk + 1) << "/" << NUM_CHUNKS << " chunks (" 
-                        << (totalReceived / (1024*1024)) << " MB)" << std::endl;
-            }
         }
         
         auto endTime = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
         
-        double gbps = CalculateGbps(totalReceived, duration.count());
+        double gbps = CalculateGbps(THROUGHPUT_TEST_SIZE, duration.count());
         std::cout << std::fixed << std::setprecision(2);
-        std::cout << "  Results - Received: " << totalReceived << " bytes (" << (totalReceived / (1024*1024)) << "MB)" << std::endl;
+        std::cout << "  Results - Received: " << THROUGHPUT_TEST_SIZE << " bytes (" << (THROUGHPUT_TEST_SIZE / (1024*1024)) << "MB)" << std::endl;
         std::cout << "  Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
         std::cout << "  Throughput: " << gbps << " Gbps" << std::endl;
 
@@ -180,16 +172,18 @@ public:
 
         uint64_t totalSent = 0;
         startTime = std::chrono::high_resolution_clock::now();
+
+        // Only set memory once
+        memset(m_Buf, 0xAB, TEST_BUFFER_SIZE);
+
+        std::string chunkSizeStr = FormatBytes(CHUNK_SIZE);
         
         for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
-            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << (CHUNK_SIZE / (1024*1024*1024)) << "GB)..." << std::endl;
+            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << chunkSizeStr << ")..." << std::endl;
             
             uint64_t chunkSent = 0;
             while (chunkSent < CHUNK_SIZE) {
                 size_t sendSize = std::min(static_cast<size_t>(TEST_BUFFER_SIZE), static_cast<size_t>(CHUNK_SIZE - chunkSent));
-                
-                // Fill buffer with test pattern for this segment
-                memset(m_Buf, 0xAB + chunk, sendSize);
                 
                 // Use SGE to control actual transfer size, not buffer size
                 sge = { m_Buf, static_cast<ULONG>(sendSize), m_pMr->GetLocalToken() };
@@ -207,7 +201,7 @@ public:
                 totalSent += sendSize;
             }
             
-            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << (totalSent / (1024*1024*1024)) << " GB" << std::endl;
+            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << FormatBytes(totalSent) << std::endl;
         }
         
         endTime = std::chrono::high_resolution_clock::now();
@@ -322,16 +316,17 @@ public:
 
         uint64_t totalSent = 0;
         auto startTime = std::chrono::high_resolution_clock::now();
+
+        // Only set memory once
+        memset(m_Buf, 0xAB, TEST_BUFFER_SIZE);
+        std::string chunkSizeStr = FormatBytes(CHUNK_SIZE);
         
         for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
-            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << (CHUNK_SIZE / (1024*1024*1024)) << "GB)..." << std::endl;
+            std::cout << "  Sending chunk " << (chunk + 1) << "/" << NUM_CHUNKS << " (" << chunkSizeStr << ")..." << std::endl;
             
             uint64_t chunkSent = 0;
             while (chunkSent < CHUNK_SIZE) {
                 size_t sendSize = std::min(static_cast<size_t>(TEST_BUFFER_SIZE), static_cast<size_t>(CHUNK_SIZE - chunkSent));
-                
-                // Fill buffer with test pattern for this segment
-                memset(m_Buf, 0xCD + chunk, sendSize);
                 
                 // Use SGE to control actual transfer size, not buffer size
                 sge = { m_Buf, static_cast<ULONG>(sendSize), m_pMr->GetLocalToken() };
@@ -349,7 +344,7 @@ public:
                 totalSent += sendSize;
             }
             
-            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << (totalSent / (1024*1024*1024)) << " GB" << std::endl;
+            std::cout << "    Chunk " << (chunk + 1) << " completed. Total sent: " << FormatBytes(totalSent) << std::endl;
         }
         
         auto endTime = std::chrono::high_resolution_clock::now();
@@ -364,10 +359,9 @@ public:
         // Test 2: Throughput Receive Test (Server -> Client)
         std::cout << "TEST 2: Throughput Receive Test (Server -> Client)" << std::endl;
         std::cout << "Receiving " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE) << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
-
-        uint64_t totalReceived = 0;
-        startTime = std::chrono::high_resolution_clock::now();
         
+        startTime = std::chrono::high_resolution_clock::now();
+
         // First loop: Batch-post all receives
         for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
             sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
@@ -387,21 +381,14 @@ public:
                 std::cerr << "WaitForCompletion failed in throughput test." << std::endl;
                 return;
             }
-            
-            totalReceived += CHUNK_SIZE;
-            
-            if ((chunk + 1) % 1000 == 0) {
-                std::cout << "  Completed " << (chunk + 1) << "/" << NUM_CHUNKS << " chunks (" 
-                        << (totalReceived / (1024*1024)) << " MB)" << std::endl;
-            }
         }
         
         endTime = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
         
-        gbps = CalculateGbps(totalReceived, duration.count());
+        gbps = CalculateGbps(THROUGHPUT_TEST_SIZE, duration.count());
         std::cout << std::fixed << std::setprecision(2);
-        std::cout << "  Results - Received: " << totalReceived << " bytes (" << (totalReceived / (1024*1024*1024)) << " GB)" << std::endl;
+        std::cout << "  Results - Received: " << THROUGHPUT_TEST_SIZE << " bytes (" << (THROUGHPUT_TEST_SIZE / (1024*1024*1024)) << " GB)" << std::endl;
         std::cout << "  Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
         std::cout << "  Throughput: " << gbps << " Gbps" << std::endl;
         #endif // TEST_THROUGHPUT

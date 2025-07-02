@@ -69,12 +69,12 @@ class NDSessionBase {
     HRESULT Write(const ND2_SGE* Sge, const ULONG nSge, UINT64 remoteAddr, UINT32 remoteToken, DWORD flags, void *requestContext = nullptr);
     HRESULT Read(const ND2_SGE* Sge, const ULONG nSge, UINT64 remoteAddr, UINT32 remoteToken, DWORD flags, void *requestContext = nullptr);
 
-    void WaitForEventNotification();
+    void WaitForEventNotification(ULONG notifyFlag);
     
-    ND2_RESULT WaitForCompletion(bool bBlocking = true);
+    ND2_RESULT WaitForCompletion(ULONG notifyFlag, bool bBlocking = true);
     HRESULT WaitForCompletion();
 
-    bool WaitForCompletionAndCheckContext(void *expectedContext);
+    bool WaitForCompletionAndCheckContext(void *expectedContext, ULONG notifyFlag = ND_CQ_NOTIFY_ANY);
 
     std::variant<HRESULT, ND2_RESULT> Bind(DWORD bufferLength, ULONG type, void *context = nullptr);
     std::variant<HRESULT, ND2_RESULT> Bind(const void *pBuf, DWORD BufferLength, ULONG type, void *context = nullptr);

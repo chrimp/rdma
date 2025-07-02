@@ -246,14 +246,14 @@ HRESULT NDSessionBase::Send(const ND2_SGE* Sge, const ULONG nSge, ULONG flags, v
     return hr;
 }
 
-void NDSessionBase::WaitForEventNotification() {
-    HRESULT hr = m_pCq->Notify(ND_CQ_NOTIFY_ANY, &m_Ov);
+void NDSessionBase::WaitForEventNotification(ULONG notifyFlag) {
+    HRESULT hr = m_pCq->Notify(notifyFlag, &m_Ov);
     if (hr == ND_PENDING) {
         hr = m_pCq->GetOverlappedResult(&m_Ov, true);
     }
 }
 
-ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
+ND2_RESULT NDSessionBase::WaitForCompletion(ULONG notifyFlag, bool bBlocking) {
     ND2_RESULT ndRes;
 
     ULONG numRes = m_pCq->GetResults(&ndRes, 1);
@@ -269,25 +269,14 @@ ND2_RESULT NDSessionBase::WaitForCompletion(bool bBlocking) {
     }
 
     do {
-        WaitForEventNotification();
+        WaitForEventNotification(notifyFlag);
     } while (m_pCq->GetResults(&ndRes, 1) == 0);
-
-    /*
-    for (;;) {
-        if (m_pCq->GetResults(&ndRes, 1) == 1) {
-            break;
-        }
-        if (bBlocking) {
-            WaitForEventNotification();
-        }
-    }
-        */
 
     return ndRes;
 }
 
-bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext) {
-    ND2_RESULT ndRes = WaitForCompletion(true);
+bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext, ULONG notifyFlag) {
+    ND2_RESULT ndRes = WaitForCompletion(notifyFlag, true);
 
     if (ndRes.Status == ND_CANCELED) {
         std::cout << "Remote has closed the connection." << std::endl;
