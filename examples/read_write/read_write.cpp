@@ -1,5 +1,7 @@
 #include "NDSession.hpp"
 #include <iostream>
+#include <thread>
+#include <chrono>
 
 constexpr int TEST_BUFFER_SIZE = 10240;
 constexpr char TEST_PORT[] = "54321";
@@ -67,11 +69,11 @@ public:
         std::cout << "Accepting connection..." << std::endl;
         if (FAILED(Accept(1, 1, nullptr, 0))) return;
         
-        std::cout << "Connection established. Waiting for client's PeerInfo..." << std::endl;
-        std::cout << "My address: " << reinterpret_cast<UINT64>(m_Buf) << ", token: " << m_pMr->GetLocalToken() << std::endl;
-
         CreateMW();
         Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
+
+        std::cout << "Connection established. Waiting for client's PeerInfo..." << std::endl;
+        std::cout << "My address: " << reinterpret_cast<UINT64>(m_Buf) << ", token: " << m_pMw->GetRemoteToken() << std::endl;
         
         ND2_SGE sge = { 0 };
         sge.Buffer = m_Buf;
@@ -97,7 +99,7 @@ public:
         
         PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
-        myInfo->remoteToken = m_pMr->GetLocalToken();
+        myInfo->remoteToken = m_pMw->GetRemoteToken();
 
         PeerInfo myInfoHolder;
         myInfoHolder.remoteAddr = myInfo->remoteAddr;
@@ -167,13 +169,15 @@ public:
 
         PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
-        myInfo->remoteToken = m_pMr->GetLocalToken();
+        myInfo->remoteToken = m_pMw->GetRemoteToken();
 
         PeerInfo myInfoHolder;
         myInfoHolder.remoteAddr = myInfo->remoteAddr;
         myInfoHolder.remoteToken = myInfo->remoteToken;
 
         std::cout << "My address: " << myInfo->remoteAddr << ", token: " << myInfo->remoteToken << std::endl;
+
+        std::this_thread::sleep_for(std::chrono::seconds(1));
 
         sge = { m_Buf, sizeof(PeerInfo), m_pMr->GetLocalToken() };
         if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
@@ -203,6 +207,27 @@ public:
         std::cout << "Received PeerInfo from server: remoteAddr = " 
                   << reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr
                   << ", remoteToken = " << reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken << std::endl;
+
+        PeerInfo remoteInfo;
+        remoteInfo.remoteAddr = reinterpret_cast<PeerInfo*>(m_Buf)->remoteAddr;
+        remoteInfo.remoteToken = reinterpret_cast<PeerInfo*>(m_Buf)->remoteToken;
+
+        memset(m_Buf, 0, TEST_BUFFER_SIZE);
+
+        // Attempt zero-byte write to server's buffer (no SGE)
+
+        std::cout << "Attempting zero-byte write to server's buffer..." << std::endl;
+        if (FAILED(Write(nullptr, 0, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, WRITE_CTXT))) {
+            std::cerr << "Write failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
+            std::cerr << "WaitForCompletion for zero-byte write failed." << std::endl;
+            return;
+        }
+
+        std::cout << "Zero-byte write to server's buffer succeeded." << std::endl;
 
         Shutdown();
     }
