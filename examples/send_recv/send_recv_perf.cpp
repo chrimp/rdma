@@ -8,8 +8,7 @@
 #undef max
 #undef min
 
-#define TEST_THROUGHPUT
-
+//#define TEST_THROUGHPUT
 
 constexpr char TEST_PORT[] = "54321";
 
@@ -217,6 +216,16 @@ public:
         // Test 3: RTT Test (Server responds to pings)
         std::cout << "\nTEST 3: Round-Trip Time Test (Server responding to pings)" << std::endl;
         std::cout << "Responding to " << RTT_TEST_ITERATIONS << " ping-pong iterations..." << std::endl;
+
+        // Two postreceives to create some room
+
+        sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
+        HRESULT one = PostReceive(&sge, 1, RECV_CTXT);
+        HRESULT two = PostReceive(&sge, 1, RECV_CTXT);
+        if (FAILED(one) || FAILED(two)) {
+            std::cerr << "PostReceive failed in RTT test." << std::endl;
+            return;
+        }
         
         for (uint32_t i = 0; i < RTT_TEST_ITERATIONS; i++) {
             std::cout << "  Waiting for ping " << (i + 1) << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
@@ -233,10 +242,10 @@ public:
                 return;
             }
             
-            std::cout << "  Received ping " << (i + 1) << ", sending pong back..." << std::endl;
+            //std::cout << "  Received ping " << (i + 1) << ", sending pong back..." << std::endl;
             
             // Send pong back to client
-            if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
+            if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE, SEND_CTXT))) {
                 std::cerr << "Send failed in RTT test." << std::endl;
                 return;
             }
@@ -245,13 +254,7 @@ public:
                 return;
             }
             
-            std::cout << "  Ping-pong " << (i + 1) << " completed. Waiting 500ms..." << std::endl;
-
-            auto waitStart = std::chrono::high_resolution_clock::now();
-            while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - waitStart).count() < 500) {
-                // Busy wait for 500ms
-                continue;
-            }
+            std::cout << "  Ping-pong " << (i + 1) << " completed." << std::endl;
         }
         
         std::cout << "  RTT test completed on server side" << std::endl;
@@ -399,6 +402,15 @@ public:
         
         std::vector<uint64_t> rttMeasurements;
         rttMeasurements.reserve(RTT_TEST_ITERATIONS);
+
+        // PostReceive twice to create some room
+        sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
+        HRESULT one = PostReceive(&sge, 1, RECV_CTXT);
+        HRESULT two = PostReceive(&sge, 1, RECV_CTXT);
+        if (FAILED(one) || FAILED(two)) {
+            std::cerr << "PostReceive failed in RTT test." << std::endl;
+            return;
+        }
         
         for (uint32_t i = 0; i < RTT_TEST_ITERATIONS; i++) {
             std::cout << "  Starting ping-pong " << (i + 1) << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
@@ -406,18 +418,11 @@ public:
             // Fill buffer with test pattern
             memset(m_Buf, 0xEF, RTT_TEST_SIZE);
             sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
-
-            // Wait momentarily to allow server to post receive
-            auto waitStart = std::chrono::high_resolution_clock::now();
-            while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - waitStart).count() < 10) {
-                // Busy wait for 10ms
-                continue;
-            }
             
             auto rttStart = std::chrono::high_resolution_clock::now();
             
             // Send ping to server
-            if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
+            if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE, SEND_CTXT))) {
                 std::cerr << "Send failed in RTT test." << std::endl;
                 return;
             }
@@ -430,7 +435,7 @@ public:
                 return;
             }
             
-            std::cout << "  Ping " << (i + 1) << " sent, waiting for pong..." << std::endl;
+            //std::cout << "  Ping " << (i + 1) << " sent, waiting for pong..." << std::endl;
             
             // Receive pong from server
 
@@ -443,15 +448,7 @@ public:
             auto rttTime = std::chrono::duration_cast<std::chrono::nanoseconds>(rttEnd - rttStart);
             rttMeasurements.push_back(rttTime.count());
             
-            std::cout << "  Ping-pong " << (i + 1) << " completed. RTT: " << CalculateLatencyMicroseconds(rttTime.count()) << " μs. Waiting 500ms..." << std::endl;
-            //std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            // Use busy wait instead of sleep to allow I/O handling
-            // Do not block the thread ND2 is running on; results in IO timeout on peer
-            waitStart = std::chrono::high_resolution_clock::now();
-            while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - waitStart).count() < 500) {
-                // Busy wait for 500ms
-                continue;
-            }
+            std::cout << "  Ping-pong " << (i + 1) << " completed. RTT: " << CalculateLatencyMicroseconds(rttTime.count()) << " μs." << std::endl;
         }
         
         // Calculate RTT statistics
