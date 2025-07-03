@@ -3,13 +3,49 @@
 #include <thread>
 #include <chrono>
 
-constexpr int TEST_BUFFER_SIZE = 10240;
 constexpr char TEST_PORT[] = "54321";
 
 #define RECV_CTXT ((void*)0x1000)
 #define SEND_CTXT ((void*)0x2000)
 #define READ_CTXT ((void*)0x3000)
 #define WRITE_CTXT ((void*)0x4000)
+
+#undef max
+#undef min
+
+constexpr size_t CHUNK_SIZE = 536870912ULL;
+constexpr size_t TEST_BUFFER_SIZE = std::max(536870912ULL, CHUNK_SIZE); // At least 512MB or chunk size
+
+static size_t maxSge = 32; // Temporary value for deciding test size
+static size_t THROUGHPUT_TEST_SIZE = CHUNK_SIZE * maxSge;
+static int NUM_CHUNKS = static_cast<int>(THROUGHPUT_TEST_SIZE / CHUNK_SIZE);  // 20 chunks
+
+constexpr size_t RTT_TEST_SIZE = 1;  // Small size for RTT test
+constexpr int RTT_TEST_ITERATIONS = 10;  // Number of ping-pong iterations
+
+std::string FormatBytes(uint64_t bytes) {
+    if (bytes >= 1024ULL * 1024 * 1024) {
+        return std::to_string(bytes / (1024ULL * 1024 * 1024)) + "GB";
+    } else if (bytes >= 1024ULL * 1024) {
+        return std::to_string(bytes / (1024ULL * 1024)) + "MB";
+    } else if (bytes >= 1024ULL) {
+        return std::to_string(bytes / 1024ULL) + "KB";
+    } else {
+        return std::to_string(bytes) + "B";
+    }
+}
+
+uint64_t GetCurrentTimestamp() {
+    return std::chrono::high_resolution_clock::now().time_since_epoch().count();
+}
+
+double CalculateGbps(uint64_t bytes, uint64_t nanoseconds) {
+    return (static_cast<double>(bytes) * 8.0) / (static_cast<double>(nanoseconds) / 1e9) / 1e9;
+}
+
+double CalculateLatencyMicroseconds(uint64_t nanoseconds) {
+    return static_cast<double>(nanoseconds) / 1000.0;
+}
 
 struct PeerInfo {
     UINT64 remoteAddr;
@@ -34,6 +70,12 @@ public:
         if (info.AdapterId == 0) return false;
 
         std::cout << "Max transfer length: " << info.MaxTransferLength << std::endl;
+        std::cout << "Max inline length: " << info.MaxInlineDataSize << std::endl;
+        std::cout << "Max send sge: " << info.MaxInitiatorSge << std::endl;
+
+        maxSge = info.MaxInitiatorSge;
+        THROUGHPUT_TEST_SIZE = CHUNK_SIZE * maxSge;
+        NUM_CHUNKS = static_cast<int>(THROUGHPUT_TEST_SIZE / CHUNK_SIZE);
 
         if (FAILED(CreateCQ(info.MaxCompletionQueueDepth))) return false;
         if (FAILED(CreateQP(info.MaxReceiveQueueDepth, info.MaxInitiatorQueueDepth, info.MaxReceiveSge, info.MaxInitiatorSge))) return false;
@@ -89,11 +131,15 @@ public:
             return;
         }
         
-        PeerInfo* remoteInfo = reinterpret_cast<PeerInfo*>(m_Buf);
-        std::cout << "Received PeerInfo from client: remoteAddr = " << remoteInfo->remoteAddr
-                  << ", remoteToken = " << remoteInfo->remoteToken << std::endl;
+        PeerInfo* receivedInfo = reinterpret_cast<PeerInfo*>(m_Buf);
+        std::cout << "Received PeerInfo from client: remoteAddr = " << receivedInfo->remoteAddr
+                  << ", remoteToken = " << receivedInfo->remoteToken << std::endl;
 
         sge = { m_Buf, sizeof(PeerInfo), m_pMr->GetLocalToken() };
+
+        PeerInfo remoteInfo;
+        remoteInfo.remoteAddr = receivedInfo->remoteAddr;
+        remoteInfo.remoteToken = receivedInfo->remoteToken;
 
         ZeroMemory(m_Buf, TEST_BUFFER_SIZE);
         
@@ -101,11 +147,10 @@ public:
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
         myInfo->remoteToken = m_pMw->GetRemoteToken();
 
-        PeerInfo myInfoHolder;
-        myInfoHolder.remoteAddr = myInfo->remoteAddr;
-        myInfoHolder.remoteToken = myInfo->remoteToken;
+        sge.BufferLength = sizeof(PeerInfo);
 
-        sge.BufferLength = TEST_BUFFER_SIZE;
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // Give time for client to prepare
+
         if (FAILED(Send(&sge, 1, 0, SEND_CTXT))) {
             std::cerr << "Send of my PeerInfo failed." << std::endl;
             return;
@@ -115,18 +160,75 @@ public:
             return;
         }
 
-        // Block until client sends
-        sge.BufferLength = TEST_BUFFER_SIZE;
-
+        // Get client's notification
         if (FAILED(PostReceive(nullptr, 0, RECV_CTXT))) {
-            std::cerr << "PostReceive for client's PeerInfo failed." << std::endl;
+            std::cerr << "PostReceive for notification failed." << std::endl;
             return;
         }
 
         if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
-            std::cerr << "WaitForCompletion for client's PeerInfo failed." << std::endl;
+            std::cerr << "WaitForCompletion for notification failed." << std::endl;
             return;
         }
+
+        std::cout << "TEST: Wrtie throughput test (Server -> Client)" << std::endl;
+        std::cout << "Writing " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE)
+                  << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
+
+        size_t totalWritten = 0;
+        auto startTime = std::chrono::high_resolution_clock::now();
+
+        memset(m_Buf, 0xAB, TEST_BUFFER_SIZE); // Fill buffer with test pattern
+
+        //CheckForOPs();
+
+        for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
+            ND2_SGE sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
+
+            if (FAILED(Write(&sge, 1, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, WRITE_CTXT))) {
+                std::cerr << "Write failed for chunk " << (chunk + 1) << "." << std::endl;
+                return;
+            }
+
+            totalWritten += CHUNK_SIZE;
+
+            //std::cout << "Chunk " << (chunk + 1) << " requested. Total: " << FormatBytes(totalWritten) << std::endl;
+        }
+
+        /*
+        if (WaitForCompletion(ND_CQ_NOTIFY_ANY, false).Status != ND_PENDING) {
+            std::cerr << "WaitForCompletion failed after writing chunks." << std::endl;
+            return;
+        }
+        */
+
+        for (int i = 0; i < NUM_CHUNKS; i++) {
+            if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
+                std::cerr << "WaitForCompletion for chunk " << (i + 1) << " failed." << std::endl;
+                return;
+            }
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+
+        double gbps = CalculateGbps(totalWritten, duration.count());
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "  Results - Written: " << FormatBytes(totalWritten) << std::endl;
+        std::cout << "Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
+        std::cout << "Throughput: " << gbps << " Gbps" << std::endl;
+
+        if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
+            std::cerr << "Send completion message failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
+            std::cerr << "WaitForCompletion for completion message failed." << std::endl;
+            return;
+        }
+
+        /*
 
         // Attempt zero-byte write to client's buffer (no SGE)
         std::cout << "Attempting zero-byte RMA" << std::endl;
@@ -162,6 +264,8 @@ public:
             std::cerr << "WaitForCompletion for completion message failed." << std::endl;
             return;
         }
+
+       */
 
         Shutdown();
     }
@@ -219,10 +323,6 @@ public:
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
         myInfo->remoteToken = m_pMw->GetRemoteToken();
 
-        PeerInfo myInfoHolder;
-        myInfoHolder.remoteAddr = myInfo->remoteAddr;
-        myInfoHolder.remoteToken = myInfo->remoteToken;
-
         std::cout << "My address: " << myInfo->remoteAddr << ", token: " << myInfo->remoteToken << std::endl;
 
         std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -262,41 +362,30 @@ public:
 
         memset(m_Buf, 0, TEST_BUFFER_SIZE);
 
-        // Attempt zero-byte write to server's buffer (no SGE)
+        // Notify Server
 
-        std::cout << "Attempting zero-byte RMA" << std::endl;
-        if (FAILED(Write(nullptr, 0, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, WRITE_CTXT))) {
-            std::cerr << "Write failed." << std::endl;
-            return;
+        auto now = GetCurrentTimestamp();
+        while (GetCurrentTimestamp() - now < 1000000) {
+            continue;
         }
 
-        if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
-            std::cerr << "WaitForCompletion for zero-byte write failed." << std::endl;
-            return;
-        }
-
-        if (FAILED(Read(nullptr, 0, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, READ_CTXT))) {
-            std::cerr << "Read failed." << std::endl;
-            return;
-        }
-
-        if (!WaitForCompletionAndCheckContext(READ_CTXT)) {
-            std::cerr << "WaitForCompletion for zero-byte read failed." << std::endl;
-            return;
-        }
-
-        std::cout << "Zero-byte RMA operations completed successfully." << std::endl;
-
-        // Send a message to the server to indicate completion
         if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
-            std::cerr << "Final send failed." << std::endl;
+            std::cerr << "Send notification to server failed." << std::endl;
             return;
         }
 
         if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
-            std::cerr << "WaitForCompletion for final send failed." << std::endl;
+            std::cerr << "WaitForCompletion for notification send failed." << std::endl;
             return;
         }
+
+        // Wait during RMA
+        /*
+        now = GetCurrentTimestamp();
+        while (GetCurrentTimestamp() - now < 10000000) { // Wait 10 seconds
+            continue;
+        }
+        */
 
         // Wait until server runs RMA operations
         if (FAILED(PostReceive(nullptr, 0, RECV_CTXT))) {

@@ -92,7 +92,7 @@ std::variant<HRESULT, ND2_RESULT> NDSessionBase::Bind(const void *pBuf, DWORD bu
         return hr;
     }
 
-    ND2_RESULT ndRes = WaitForCompletion(true);
+    ND2_RESULT ndRes = WaitForCompletion(ND_CQ_NOTIFY_ANY, true);
     if (ndRes.Status == ND_SUCCESS && ndRes.RequestContext != context) {
         return E_INVALIDARG;
     }
@@ -302,7 +302,7 @@ bool NDSessionBase::WaitForCompletionAndCheckContext(void *expectedContext, ULON
 }
 
 HRESULT NDSessionBase::WaitForCompletion() {
-    ND2_RESULT ndRes= WaitForCompletion(true);
+    ND2_RESULT ndRes= WaitForCompletion(ND_CQ_NOTIFY_ANY, true);
     return ndRes.Status;
 }
 
@@ -319,7 +319,7 @@ HRESULT NDSessionBase::Reject(const void *pPrivateData, DWORD cbPrivateData) {
 void NDSessionBase::ClearOPs() {
     FlushQP();
     while (true) {
-        ND2_RESULT result = WaitForCompletion(false);
+        ND2_RESULT result = WaitForCompletion(ND_CQ_NOTIFY_ANY, false);
         if (result.Status == ND_NO_MORE_ENTRIES || result.Status == ND_PENDING) break;
     }
 }
