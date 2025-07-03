@@ -11,7 +11,7 @@
 class NDSessionBase {
     public:
     void CheckForOPs() {
-        ND2_RESULT ndRes = WaitForCompletion(false);
+        ND2_RESULT ndRes = WaitForCompletion(ND_CQ_NOTIFY_ANY, false);
         if (ndRes.Status != ND_PENDING) {
             std::cout << "There are pending operations: " << ndRes.RequestType << std::endl;
         } else {
@@ -82,6 +82,7 @@ class NDSessionBase {
     void Shutdown();
 
     HRESULT FlushQP();
+
     HRESULT Reject(const VOID *pPrivateData, DWORD cbPrivateData);
 };
 
