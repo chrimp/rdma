@@ -8,7 +8,7 @@
 #undef max
 #undef min
 
-//#define TEST_THROUGHPUT
+#define TEST_THROUGHPUT
 
 constexpr char TEST_PORT[] = "54321";
 
@@ -410,6 +410,12 @@ public:
         if (FAILED(one) || FAILED(two)) {
             std::cerr << "PostReceive failed in RTT test." << std::endl;
             return;
+        }
+
+        // Hold 100ms
+        auto now = std::chrono::high_resolution_clock::now();
+        while (std::chrono::high_resolution_clock::now() - now < std::chrono::milliseconds(100)) {
+            _mm_pause();
         }
         
         for (uint32_t i = 0; i < RTT_TEST_ITERATIONS; i++) {
