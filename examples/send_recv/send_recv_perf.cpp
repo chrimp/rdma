@@ -8,7 +8,7 @@
 #undef max
 #undef min
 
-#define TEST_THROUGHPUT
+//#define TEST_THROUGHPUT
 
 constexpr char TEST_PORT[] = "54321";
 
@@ -20,8 +20,8 @@ constexpr size_t maxSge = 32; // Temporary value for deciding test size
 constexpr size_t THROUGHPUT_TEST_SIZE = CHUNK_SIZE * maxSge;
 
 constexpr int NUM_CHUNKS = static_cast<int>(THROUGHPUT_TEST_SIZE / CHUNK_SIZE);  // 20 chunks
-constexpr size_t RTT_TEST_SIZE = 1;  // Small size for RTT test
-constexpr int RTT_TEST_ITERATIONS = 10;  // Number of ping-pong iterations
+constexpr size_t RTT_TEST_SIZE = 64;  // Small size for RTT test
+constexpr int RTT_TEST_ITERATIONS = 1000;  // Number of ping-pong iterations
 
 #define RECV_CTXT ((void*)0x1000)
 #define SEND_CTXT ((void*)0x2000)
@@ -79,7 +79,10 @@ void ShowUsage() {
 
 // MARK: TestServer
 class TestServer : public NDSessionServerBase {
-public:
+    private:
+    ULONG m_MaxReceiveSge = 0;
+
+    public:
     bool Setup(char* localAddr) {
         if (!Initialize(localAddr)) return false;
 
@@ -88,7 +91,10 @@ public:
 
         std::cout << "Max transfer length: " << info.MaxTransferLength << std::endl;
         std::cout << "Max send sge: " << info.MaxInitiatorSge << std::endl;
+        std::cout << "Max receive sge: " << info.MaxReceiveSge << std::endl;
         std::cout << "Send/Write threshold: " << info.LargeRequestThreshold << std::endl;
+
+        m_MaxReceiveSge = info.MaxReceiveSge;
 
         if (FAILED(CreateCQ(info.MaxCompletionQueueDepth))) return false;
         if (FAILED(CreateQP(info.MaxReceiveQueueDepth, info.MaxInitiatorQueueDepth, info.MaxReceiveSge, info.MaxInitiatorSge))) return false;
@@ -220,41 +226,55 @@ public:
         // Two postreceives to create some room
 
         sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
+        /*
         HRESULT one = PostReceive(&sge, 1, RECV_CTXT);
         HRESULT two = PostReceive(&sge, 1, RECV_CTXT);
         if (FAILED(one) || FAILED(two)) {
             std::cerr << "PostReceive failed in RTT test." << std::endl;
             return;
         }
-        
-        for (uint32_t i = 0; i < RTT_TEST_ITERATIONS; i++) {
-            std::cout << "  Waiting for ping " << (i + 1) << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
-            
-            // Receive ping from client
-            sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
-            
-            if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
-                std::cerr << "PostReceive failed in RTT test." << std::endl;
-                return;
+        */
+
+        int remainingIters = RTT_TEST_ITERATIONS;
+        int completedIters = 0;
+
+
+        while (remainingIters > 0) {
+
+            int batchSize = std::min(remainingIters, static_cast<int>(m_MaxReceiveSge));
+
+            std::cout << "  Posting " << batchSize << " receives for RTT test..." << std::endl;
+            // Post RTT_TEST_ITERATIONS receives
+            for (int i = 0; i < batchSize; i++) {
+                if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
+                    std::cerr << "PostReceive failed in RTT test." << std::endl;
+                    return;
+                }
             }
-            if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
-                std::cerr << "WaitForCompletion failed in RTT test." << std::endl;
-                return;
+
+            for (int i = 0; i < batchSize; i++) {
+                int currentIteration = completedIters + i + 1;
+                std::cout << "  Waiting for ping " << currentIteration << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
+                
+                // Receive ping from client
+                if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+                    std::cerr << "WaitForCompletion failed in RTT test." << std::endl;
+                    return;
+                }
+                
+                //std::cout << "  Received ping " << (i + 1) << ", sending pong back..." << std::endl;
+                
+                // Send pong back to client
+                if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE | ND_OP_FLAG_SILENT_SUCCESS, SEND_CTXT))) {
+                    std::cerr << "Send failed in RTT test." << std::endl;
+                    return;
+                }
+                
+                std::cout << "  Ping-pong " << currentIteration << " completed." << std::endl;
             }
-            
-            //std::cout << "  Received ping " << (i + 1) << ", sending pong back..." << std::endl;
-            
-            // Send pong back to client
-            if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE, SEND_CTXT))) {
-                std::cerr << "Send failed in RTT test." << std::endl;
-                return;
-            }
-            if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
-                std::cerr << "WaitForCompletion failed in RTT test." << std::endl;
-                return;
-            }
-            
-            std::cout << "  Ping-pong " << (i + 1) << " completed." << std::endl;
+
+            completedIters += batchSize;
+            remainingIters -= batchSize;
         }
         
         std::cout << "  RTT test completed on server side" << std::endl;
@@ -269,12 +289,16 @@ public:
 
 // MARK: TestClient
 class TestClient : public NDSessionClientBase {
+    private:
+    ULONG m_MaxReceiveSge = 0;
 public:
     bool Setup(char* localAddr) {
         if (!Initialize(localAddr)) return false;
 
         ND2_ADAPTER_INFO info = GetAdapterInfo();
         if (info.AdapterId == 0) return false;
+
+        m_MaxReceiveSge = info.MaxReceiveSge;
 
         if (FAILED(CreateCQ(info.MaxCompletionQueueDepth))) return false;
         if (FAILED(CreateQP(info.MaxReceiveQueueDepth, info.MaxInitiatorQueueDepth, info.MaxReceiveSge, info.MaxInitiatorSge))) return false;
@@ -405,56 +429,66 @@ public:
 
         // PostReceive twice to create some room
         sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
-        HRESULT one = PostReceive(&sge, 1, RECV_CTXT);
-        HRESULT two = PostReceive(&sge, 1, RECV_CTXT);
-        if (FAILED(one) || FAILED(two)) {
-            std::cerr << "PostReceive failed in RTT test." << std::endl;
-            return;
-        }
 
-        // Hold 100ms
-        auto now = std::chrono::high_resolution_clock::now();
-        while (std::chrono::high_resolution_clock::now() - now < std::chrono::milliseconds(100)) {
-            _mm_pause();
-        }
-        
-        for (uint32_t i = 0; i < RTT_TEST_ITERATIONS; i++) {
-            std::cout << "  Starting ping-pong " << (i + 1) << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
-            
-            // Fill buffer with test pattern
-            memset(m_Buf, 0xEF, RTT_TEST_SIZE);
-            sge = { m_Buf, static_cast<ULONG>(RTT_TEST_SIZE), m_pMr->GetLocalToken() };
-            
-            auto rttStart = std::chrono::high_resolution_clock::now();
-            
-            // Send ping to server
-            if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE, SEND_CTXT))) {
-                std::cerr << "Send failed in RTT test." << std::endl;
-                return;
-            }
-            if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
-              std::cerr << "PostReceive failed in RTT test." << std::endl;
-              return;
-            }
-            if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
-                std::cerr << "WaitForCompletion failed in RTT test." << std::endl;
-                return;
-            }
-            
-            //std::cout << "  Ping " << (i + 1) << " sent, waiting for pong..." << std::endl;
-            
-            // Receive pong from server
+        // memset here
+        memset(m_Buf, 0xEF, RTT_TEST_SIZE);
 
-            if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
-                std::cerr << "WaitForCompletion failed in RTT test." << std::endl;
-                return;
+        int remainingIters = RTT_TEST_ITERATIONS;
+        int completedIters = 0;
+
+        while (remainingIters > 0) {
+            // Hold 100ms
+            auto now = std::chrono::high_resolution_clock::now();
+            while (std::chrono::high_resolution_clock::now() - now < std::chrono::milliseconds(100)) {
+                _mm_pause();
+            }
+
+            int batchSize = std::min(remainingIters, static_cast<int>(m_MaxReceiveSge));
+
+            std::cout << "  Posting " << batchSize << " receives for RTT test..." << std::endl;
+            // Post RTT_TEST_ITERATIONS receives
+            for (int i = 0; i < batchSize; i++) {
+                if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
+                    std::cerr << "PostReceive failed in RTT test." << std::endl;
+                    return;
+                }
             }
             
-            auto rttEnd = std::chrono::high_resolution_clock::now();
-            auto rttTime = std::chrono::duration_cast<std::chrono::nanoseconds>(rttEnd - rttStart);
-            rttMeasurements.push_back(rttTime.count());
-            
-            std::cout << "  Ping-pong " << (i + 1) << " completed. RTT: " << CalculateLatencyMicroseconds(rttTime.count()) << " μs." << std::endl;
+            for (int i = 0; i < batchSize; i++) {
+                int currentIteration = completedIters + i + 1;
+                std::cout << "  Starting ping-pong " << currentIteration << "/" << RTT_TEST_ITERATIONS << "..." << std::endl;
+                
+                auto rttStart = std::chrono::high_resolution_clock::now();
+                // Send ping to server
+                if (FAILED(Send(&sge, 1, ND_OP_FLAG_INLINE | ND_OP_FLAG_SILENT_SUCCESS, SEND_CTXT))) {
+                    std::cerr << "Send failed in RTT test." << std::endl;
+                    return;
+                }
+                /*
+                if (FAILED(PostReceive(&sge, 1, RECV_CTXT))) {
+                std::cerr << "PostReceive failed in RTT test." << std::endl;
+                return;
+                }
+                */
+                
+                //std::cout << "  Ping " << (i + 1) << " sent, waiting for pong..." << std::endl;
+                
+                // Receive pong from server
+
+                if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+                    std::cerr << "WaitForCompletion failed in RTT test." << std::endl;
+                    return;
+                }
+                
+                auto rttEnd = std::chrono::high_resolution_clock::now();
+                auto rttTime = std::chrono::duration_cast<std::chrono::nanoseconds>(rttEnd - rttStart);
+                rttMeasurements.push_back(rttTime.count());
+                
+                std::cout << "  Ping-pong " << currentIteration << " completed. RTT: " << CalculateLatencyMicroseconds(rttTime.count()) << " μs." << std::endl;
+            }
+
+            completedIters += batchSize;
+            remainingIters -= batchSize;
         }
         
         // Calculate RTT statistics
