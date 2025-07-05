@@ -218,6 +218,38 @@ public:
         std::cout << "Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
         std::cout << "Throughput: " << gbps << " Gbps" << std::endl;
 
+        // Read test (Server -> Client)
+        std::cout << "TEST: Read throughput test (Server -> Client)" << std::endl;
+        std::cout << "Reading " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE)
+                  << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
+        totalWritten = 0;
+        startTime = std::chrono::high_resolution_clock::now();
+
+        for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
+            ND2_SGE sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
+            if (FAILED(Read(&sge, 1, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, READ_CTXT))) {
+                std::cerr << "Read failed for chunk " << (chunk + 1) << "." << std::endl;
+                return;
+            }
+            totalWritten += CHUNK_SIZE;
+        }
+
+        for (int i = 0; i < NUM_CHUNKS; i++) {
+            if (!WaitForCompletionAndCheckContext(READ_CTXT)) {
+                std::cerr << "WaitForCompletion for read chunk " << (i + 1) << " failed." << std::endl;
+                return;
+            }
+        }
+
+        endTime = std::chrono::high_resolution_clock::now();
+        duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+        gbps = CalculateGbps(totalWritten, duration.count());
+        std::cout << "  Results - Read: " << FormatBytes(totalWritten) << std::endl;
+        std::cout << "Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
+        std::cout << "Throughput: " << gbps << " Gbps" << std::endl;
+        std::cout << "Read test completed successfully." << std::endl;
+
+        // Notify client that RMA operations are done
         if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
             std::cerr << "Send completion message failed." << std::endl;
             return;
@@ -284,6 +316,9 @@ public:
         if (FAILED(CreateQP(info.MaxReceiveQueueDepth, info.MaxInitiatorQueueDepth, info.MaxReceiveSge, info.MaxInitiatorSge))) return false;
         if (FAILED(CreateMR())) return false;
 
+        // This flag does not limit remote to read the memory region.
+        // Guess write is super-permission of read.
+        // It's different for MemoryWindow, see line 356.
         ULONG flags = ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE;
         if (FAILED(RegisterDataBuffer(TEST_BUFFER_SIZE, flags))) return false;
         if (FAILED(CreateConnector())) return false;
@@ -317,7 +352,8 @@ public:
         std::cout << "Connection established." << std::endl;
 
         CreateMW();
-        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
+        // However, MemoryWindow should be specified to allow both read and write separately.
+        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE | ND_OP_FLAG_ALLOW_READ);
 
         PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
