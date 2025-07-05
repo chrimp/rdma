@@ -112,7 +112,7 @@ public:
         if (FAILED(Accept(1, 1, nullptr, 0))) return;
         
         CreateMW();
-        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
+        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE | ND_OP_FLAG_ALLOW_READ);
 
         std::cout << "Connection established. Waiting for client's PeerInfo..." << std::endl;
         std::cout << "My address: " << reinterpret_cast<UINT64>(m_Buf) << ", token: " << m_pMw->GetRemoteToken() << std::endl;
@@ -180,8 +180,6 @@ public:
 
         memset(m_Buf, 0xAB, TEST_BUFFER_SIZE); // Fill buffer with test pattern
 
-        //CheckForOPs();
-
         for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
             ND2_SGE sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
 
@@ -191,16 +189,7 @@ public:
             }
 
             totalWritten += CHUNK_SIZE;
-
-            //std::cout << "Chunk " << (chunk + 1) << " requested. Total: " << FormatBytes(totalWritten) << std::endl;
         }
-
-        /*
-        if (WaitForCompletion(ND_CQ_NOTIFY_ANY, false).Status != ND_PENDING) {
-            std::cerr << "WaitForCompletion failed after writing chunks." << std::endl;
-            return;
-        }
-        */
 
         for (int i = 0; i < NUM_CHUNKS; i++) {
             if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
@@ -218,6 +207,38 @@ public:
         std::cout << "Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
         std::cout << "Throughput: " << gbps << " Gbps" << std::endl;
 
+        // Read test (Server -> Client)
+        std::cout << "TEST: Read throughput test (Server -> Client)" << std::endl;
+        std::cout << "Reading " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE)
+                  << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
+        totalWritten = 0;
+        startTime = std::chrono::high_resolution_clock::now();
+
+        for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
+            ND2_SGE sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
+            if (FAILED(Read(&sge, 1, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, READ_CTXT))) {
+                std::cerr << "Read failed for chunk " << (chunk + 1) << "." << std::endl;
+                return;
+            }
+            totalWritten += CHUNK_SIZE;
+        }
+
+        for (int i = 0; i < NUM_CHUNKS; i++) {
+            if (!WaitForCompletionAndCheckContext(READ_CTXT)) {
+                std::cerr << "WaitForCompletion for read chunk " << (i + 1) << " failed." << std::endl;
+                return;
+            }
+        }
+
+        endTime = std::chrono::high_resolution_clock::now();
+        duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+        gbps = CalculateGbps(totalWritten, duration.count());
+        std::cout << "  Results - Read: " << FormatBytes(totalWritten) << std::endl;
+        std::cout << "Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
+        std::cout << "Throughput: " << gbps << " Gbps" << std::endl;
+        std::cout << "Read test completed successfully." << std::endl;
+
+        // Notify client that RMA operations are done
         if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
             std::cerr << "Send completion message failed." << std::endl;
             return;
@@ -228,44 +249,15 @@ public:
             return;
         }
 
-        /*
-
-        // Attempt zero-byte write to client's buffer (no SGE)
-        std::cout << "Attempting zero-byte RMA" << std::endl;
-        if (FAILED(Write(nullptr, 0, remoteInfo->remoteAddr, remoteInfo->remoteToken, 0, WRITE_CTXT))) {
-            std::cerr << "Write failed." << std::endl;
+        // Wait for client to finish
+        if (FAILED(PostReceive(nullptr, 0, RECV_CTXT))) {
+            std::cerr << "PostReceive for client's RMA operations failed." << std::endl;
             return;
         }
-
-        if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
-            std::cerr << "WaitForCompletion for zero-byte write failed." << std::endl;
+        if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
+            std::cerr << "WaitForCompletion for client's RMA operations failed." << std::endl;
             return;
         }
-
-        if (FAILED(Read(nullptr, 0, remoteInfo->remoteAddr, remoteInfo->remoteToken, 0, READ_CTXT))) {
-            std::cerr << "Read failed." << std::endl;
-            return;
-        }
-
-        if (!WaitForCompletionAndCheckContext(READ_CTXT)) {
-            std::cerr << "WaitForCompletion for zero-byte read failed." << std::endl;
-            return;
-        }
-
-        std::cout << "Zero-byte RMA operations completed successfully." << std::endl;
-
-        // Send a message to the client to indicate completion
-        if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
-            std::cerr << "Send completion message failed." << std::endl;
-            return;
-        }
-
-        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
-            std::cerr << "WaitForCompletion for completion message failed." << std::endl;
-            return;
-        }
-
-       */
 
         Shutdown();
     }
@@ -284,6 +276,9 @@ public:
         if (FAILED(CreateQP(info.MaxReceiveQueueDepth, info.MaxInitiatorQueueDepth, info.MaxReceiveSge, info.MaxInitiatorSge))) return false;
         if (FAILED(CreateMR())) return false;
 
+        // This flag does not limit remote to read the memory region.
+        // Guess write is super-permission of read.
+        // It's different for MemoryWindow, see line 305.
         ULONG flags = ND_MR_FLAG_ALLOW_LOCAL_WRITE | ND_MR_FLAG_ALLOW_REMOTE_WRITE;
         if (FAILED(RegisterDataBuffer(TEST_BUFFER_SIZE, flags))) return false;
         if (FAILED(CreateConnector())) return false;
@@ -317,7 +312,8 @@ public:
         std::cout << "Connection established." << std::endl;
 
         CreateMW();
-        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE);
+        // However, MemoryWindow should be specified to allow both read and write separately.
+        Bind(m_Buf, TEST_BUFFER_SIZE, ND_OP_FLAG_ALLOW_WRITE | ND_OP_FLAG_ALLOW_READ);
 
         PeerInfo* myInfo = reinterpret_cast<PeerInfo*>(m_Buf);
         myInfo->remoteAddr = reinterpret_cast<UINT64>(m_Buf);
@@ -379,14 +375,6 @@ public:
             return;
         }
 
-        // Wait during RMA
-        /*
-        now = GetCurrentTimestamp();
-        while (GetCurrentTimestamp() - now < 10000000) { // Wait 10 seconds
-            continue;
-        }
-        */
-
         // Wait until server runs RMA operations
         if (FAILED(PostReceive(nullptr, 0, RECV_CTXT))) {
             std::cerr << "PostReceive for server's RMA operations failed." << std::endl;
@@ -394,6 +382,82 @@ public:
         }
         if (!WaitForCompletionAndCheckContext(RECV_CTXT)) {
             std::cerr << "WaitForCompletion for server's RMA operations failed." << std::endl;
+            return;
+        }
+
+        // Write throughput test (Client -> Server)
+        std::cout << "TEST: Write throughput test (Client -> Server)" << std::endl;
+        std::cout << "Writing " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE)
+                    << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
+        size_t totalWritten = 0;
+        auto startTime = std::chrono::high_resolution_clock::now();
+        memset(m_Buf, 0xAB, TEST_BUFFER_SIZE); // Fill buffer with test pattern
+
+        for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
+            ND2_SGE sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
+            if (FAILED(Write(&sge, 1, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, WRITE_CTXT))) {
+                std::cerr << "Write failed for chunk " << (chunk + 1) << "." << std::endl;
+                return;
+            }
+
+            totalWritten += CHUNK_SIZE;
+            //std::cout << "Chunk " << (chunk + 1) << " requested. Total: " << FormatBytes(totalWritten) << std::endl;
+        }
+
+        for (int i = 0; i < NUM_CHUNKS; i++) {
+            if (!WaitForCompletionAndCheckContext(WRITE_CTXT)) {
+                std::cerr << "WaitForCompletion for chunk " << (i + 1) << " failed." << std::endl;
+                return;
+            }
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+        double gbps = CalculateGbps(totalWritten, duration.count());
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "  Results - Written: " << FormatBytes(totalWritten) << std::endl;
+        std::cout << "Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
+        std::cout << "Throughput: " << gbps << " Gbps" << std::endl;
+
+        // Read throughput test (Client -> Server)
+        std::cout << "TEST: Read throughput test (Client -> Server)" << std::endl;
+        std::cout << "Reading " << NUM_CHUNKS << " chunks of " << FormatBytes(CHUNK_SIZE)
+                    << " each (total: " << FormatBytes(THROUGHPUT_TEST_SIZE) << ")..." << std::endl;
+
+        totalWritten = 0;
+        startTime = std::chrono::high_resolution_clock::now();
+        for (int chunk = 0; chunk < NUM_CHUNKS; chunk++) {
+            ND2_SGE sge = { m_Buf, static_cast<ULONG>(CHUNK_SIZE), m_pMr->GetLocalToken() };
+            if (FAILED(Read(&sge, 1, remoteInfo.remoteAddr, remoteInfo.remoteToken, 0, READ_CTXT))) {
+                std::cerr << "Read failed for chunk " << (chunk + 1) << "." << std::endl;
+                return;
+            }
+
+            totalWritten += CHUNK_SIZE;
+        }
+
+        for (int i = 0; i < NUM_CHUNKS; i++) {
+            if (!WaitForCompletionAndCheckContext(READ_CTXT)) {
+                std::cerr << "WaitForCompletion for read chunk " << (i + 1) << " failed." << std::endl;
+                return;
+            }
+        }
+        endTime = std::chrono::high_resolution_clock::now();
+        duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+        gbps = CalculateGbps(totalWritten, duration.count());
+        std::cout << "  Results - Read: " << FormatBytes(totalWritten) << std::endl;
+        std::cout << "Duration: " << (duration.count() / 1e9) << " seconds" << std::endl;
+        std::cout << "Throughput: " << gbps << " Gbps" << std::endl;
+        std::cout << "Read test completed successfully." << std::endl;
+
+        // Notify server that RMA operations are done
+        if (FAILED(Send(nullptr, 0, 0, SEND_CTXT))) {
+            std::cerr << "Send completion message failed." << std::endl;
+            return;
+        }
+
+        if (!WaitForCompletionAndCheckContext(SEND_CTXT)) {
+            std::cerr << "WaitForCompletion for completion message failed." << std::endl;
             return;
         }
 
