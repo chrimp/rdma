@@ -27,9 +27,7 @@ add_subdirectory("examples/read_write")
 
 if (WIN32)
     add_subdirectory("include/Win/NetworkDirect")
-    add_subdirectory("include/Win/MyND2Class")
-
-    #target_link_libraries(rdma PRIVATE NetworkDirect MyND2Class ws2_32)
+    add_subdirectory("include/Win/NDSession")
 endif()
 
 # TODO: Add tests and install targets if needed.
